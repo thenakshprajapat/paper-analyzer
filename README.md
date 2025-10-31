@@ -1,4 +1,4 @@
-# 📄 Paper Analyzer
+<!-- # 📄 Paper Analyzer
 
 A web application that helps students analyze exam papers to identify frequently tested chapters and topics.
 
@@ -139,4 +139,4 @@ PRs welcome. Please create branches for feature work and open pull requests. Add
 
 ## License
 
-MIT License
+MIT License -->
