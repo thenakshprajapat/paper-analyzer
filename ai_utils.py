@@ -47,69 +47,34 @@ DEFAULT_PROVIDER = "gemini" if (GEMINI_AVAILABLE and GEMINI_API_KEY) else \
 
 # ===== Prompts =====
 ANALYSIS_SYSTEM_PROMPT = """You are an expert educational content analyzer specializing in exam paper analysis. 
-You identify academic chapters/subjects and extract key technical/academic topics from exam questions with high precision.
+Your task is to identify academic chapters, subjects, and key topics from exam questions accurately.
 
-CRITICAL RULES:
-- Extract only meaningful academic/technical concepts (e.g., "Binary Search", "Photosynthesis", "Newton's Laws")
-- NEVER extract common words like: statement, given, following, correct, true, false, both, either, assertion, reason
-- NEVER extract question format words: ncert, column, section, marks, explain, write
-- Focus on multi-word technical terms (2-4 words preferred)
-- Prioritize subject-specific vocabulary and concepts"""
+Focus on:
+- Technical and academic concepts like "Binary Search", "Photosynthesis", "Newton's Laws"
+- Multi-word phrases that represent specific topics
+- Subject-specific vocabulary and named theories
 
-CHAPTER_ANALYSIS_PROMPT = """Analyze this exam paper text and identify the specific chapters, units, or sections that questions are from.
+Avoid common words that don't represent specific topics."""
 
-Look for:
-- Chapter titles/names mentioned in questions (e.g., "Chapter 3: Data Structures")
-- Section headings or unit references
-- Topic groupings that indicate different chapters
-- Common chapter patterns like: Introduction, Fundamentals, Advanced Topics, Applications, etc.
+CHAPTER_ANALYSIS_PROMPT = """Analyze this exam paper and identify chapters/topics.
 
-Text excerpt:
-\"\"\"
+Text:
 {text}
-\"\"\"
 
-Respond with a JSON object:
-{{
-  "chapters": [
-    {{"name": "Specific Chapter/Unit Name", "confidence": 0.95, "evidence": ["keyword1", "keyword2"]}},
-    ...
-  ],
-  "primary_subject": "Overall subject area"
-}}
+IMPORTANT: Respond with ONLY valid JSON, no markdown, no explanation. Use this exact format:
+{{"chapters": [{{"name": "Chapter Name", "confidence": 0.9, "evidence": ["keyword"]}}], "primary_subject": "Subject"}}
 
-Be specific - extract actual chapter names from the paper, not just broad subjects. If no explicit chapter names exist, identify distinct topic areas (e.g., "Sorting Algorithms", "Database Management", "Object-Oriented Programming")."""
+Extract actual chapter names or main topic areas from the paper."""
 
-TOPIC_EXTRACTION_PROMPT = """Extract ONLY specific academic concepts and named theories/laws/processes from this exam paper.
+TOPIC_EXTRACTION_PROMPT = """Extract key academic topics from this exam paper.
 
-STRICT RULES - Extract ONLY:
-✅ Named concepts: "Ohm's Law", "Photosynthesis", "Binary Search Tree", "Le Chatelier's Principle"
-✅ Technical processes: "Cellular Respiration", "Electrolysis", "Polymerization"  
-✅ Specific theories: "Darwin's Theory", "Quantum Mechanics", "Thermodynamics"
-✅ Named structures: "DNA Structure", "Benzene Ring", "Nervous System"
-
-❌ NEVER extract:
-- Single generic words: energy, water, field, force, current, pressure, solution, compound, bone
-- Common adjectives: magnetic, increases
-- Question words: statement, given, following, correct, assertion, reason
-
-Text excerpt:
-\"\"\"
+Text:
 {text}
-\"\"\"
 
-Respond with a JSON object:
-{{
-  "topics": [
-    {{"topic": "Specific Named Concept (2-5 words)", "relevance": 0.9, "category": "subject"}},
-    ...
-  ]
-}}
+IMPORTANT: Respond with ONLY valid JSON, no markdown, no explanation. Use this exact format:
+{{"topics": [{{"topic": "Topic Name", "relevance": 0.9, "category": "subject"}}]}}
 
-GOOD: "Chemical Equilibrium", "Newton's Laws of Motion", "DNA Replication", "Redox Reactions"
-BAD: "energy", "water", "increases", "field", "current", "pressure"
-
-Extract 8-12 SPECIFIC academic concepts only."""
+Focus on specific academic concepts, technical terms, and named theories. Avoid generic words like water, energy, field."""
 
 QUESTION_CLASSIFY_PROMPT = """Classify this exam question into a specific chapter/unit and extract topics.
 
@@ -155,9 +120,9 @@ def analyze_chapters_ai(text: str, provider: str = None, sample_size: int = 3000
     
     try:
         if provider == "gemini":
-            result = _call_gemini(prompt, system_prompt=ANALYSIS_SYSTEM_PROMPT)
+            result = _call_gemini(prompt, system_prompt="")  # NO SYSTEM PROMPT
         elif provider == "openai":
-            result = _call_openai(prompt, system_prompt=ANALYSIS_SYSTEM_PROMPT)
+            result = _call_openai(prompt, system_prompt="")  # NO SYSTEM PROMPT
         else:
             return {"chapters": {}, "primary_subject": "Unknown"}
         
@@ -193,9 +158,9 @@ def extract_topics_ai(text: str, provider: str = None, sample_size: int = 3000) 
     
     try:
         if provider == "gemini":
-            result = _call_gemini(prompt, system_prompt=ANALYSIS_SYSTEM_PROMPT)
+            result = _call_gemini(prompt, system_prompt="")  # NO SYSTEM PROMPT
         elif provider == "openai":
-            result = _call_openai(prompt, system_prompt=ANALYSIS_SYSTEM_PROMPT)
+            result = _call_openai(prompt, system_prompt="")  # NO SYSTEM PROMPT
         else:
             return {}
         
@@ -264,9 +229,18 @@ def _call_gemini(prompt: str, system_prompt: str = "", model: str = "gemini-2.5-
     if not GEMINI_AVAILABLE or not GEMINI_API_KEY:
         raise RuntimeError("Gemini not available")
     
+    # Disable safety filters for educational content analysis
+    safety_settings = {
+        "HARM_CATEGORY_HARASSMENT": "BLOCK_NONE",
+        "HARM_CATEGORY_HATE_SPEECH": "BLOCK_NONE",
+        "HARM_CATEGORY_SEXUALLY_EXPLICIT": "BLOCK_NONE",
+        "HARM_CATEGORY_DANGEROUS_CONTENT": "BLOCK_NONE",
+    }
+    
     model_obj = genai.GenerativeModel(
         model_name=model,
-        system_instruction=system_prompt if system_prompt else None
+        system_instruction=system_prompt if system_prompt else None,
+        safety_settings=safety_settings
     )
     
     response = model_obj.generate_content(
@@ -274,10 +248,18 @@ def _call_gemini(prompt: str, system_prompt: str = "", model: str = "gemini-2.5-
         generation_config=genai.GenerationConfig(
             temperature=0.1,
             max_output_tokens=2000,
-        )
+        ),
+        safety_settings=safety_settings
     )
     
-    return response.text
+    # Handle safety filter blocks
+    try:
+        return response.text
+    except ValueError as e:
+        if "finish_reason" in str(e):
+            logger.warning(f"Gemini safety filter triggered: {e}")
+            raise RuntimeError(f"Content blocked by safety filter: {e}")
+        raise
 
 
 def _call_openai(prompt: str, system_prompt: str = "", model: str = "gpt-3.5-turbo") -> str:
@@ -318,20 +300,42 @@ def _sample_text(text: str, max_chars: int = 3000) -> str:
 
 
 def _extract_json(text: str) -> Dict:
-    """Extract and parse JSON from AI response"""
-    # Try to find JSON in response
-    json_match = re.search(r'\{[\s\S]*\}', text)
+    """Extract and parse JSON from AI response, handling markdown code blocks"""
+    # Strip markdown code blocks if present (```json ... ``` or ``` ... ```)
+    cleaned_text = text.strip()
+    
+    # Remove markdown code fences
+    if cleaned_text.startswith('```'):
+        # Find the end of the opening fence
+        first_newline = cleaned_text.find('\n')
+        if first_newline != -1:
+            cleaned_text = cleaned_text[first_newline + 1:]
+        
+        # Remove closing fence
+        if cleaned_text.endswith('```'):
+            cleaned_text = cleaned_text[:-3]
+        
+        cleaned_text = cleaned_text.strip()
+    
+    # Try to parse cleaned text directly
+    try:
+        return json.loads(cleaned_text)
+    except json.JSONDecodeError:
+        pass
+    
+    # Try to find JSON object in text
+    json_match = re.search(r'\{[\s\S]*\}', cleaned_text)
     if json_match:
         try:
             return json.loads(json_match.group(0))
         except json.JSONDecodeError:
             pass
     
-    # Fallback: try to parse entire response
+    # Last resort: try original text
     try:
         return json.loads(text)
     except json.JSONDecodeError:
-        logger.warning("Could not parse JSON from AI response")
+        logger.warning(f"Could not parse JSON from AI response. Text preview: {text[:200]}")
         return {}
 
 
