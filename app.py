@@ -6,6 +6,23 @@ from collections import Counter
 import os
 from werkzeug.utils import secure_filename
 import logging
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
+
+# Import AI utilities
+try:
+    from ai_utils import (
+        analyze_chapters_ai, 
+        extract_topics_ai, 
+        get_ai_status,
+        DEFAULT_PROVIDER
+    )
+    AI_ENABLED = True
+except ImportError as e:
+    logging.warning(f"AI utilities not available: {e}")
+    AI_ENABLED = False
 
 # --- App setup (must be defined before route decorators) ---
 app = Flask(__name__, static_folder='static', template_folder='templates')
@@ -14,6 +31,14 @@ CORS(app)
 # Logging
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
+
+# Log AI status
+if AI_ENABLED:
+    ai_status = get_ai_status()
+    logger.info(f"AI Status: {ai_status}")
+    logger.info(f"Using provider: {DEFAULT_PROVIDER}")
+else:
+    logger.warning("AI features disabled - using basic keyword matching only")
 
 # Config
 UPLOAD_FOLDER = 'uploads'
@@ -102,6 +127,20 @@ def extract_topics(text):
 def index():
     return render_template('index.html')
 
+@app.route('/ai-status')
+def ai_status_route():
+    """Endpoint to check AI integration status"""
+    if AI_ENABLED:
+        status = get_ai_status()
+        return jsonify(status)
+    else:
+        return jsonify({
+            'gemini_available': False,
+            'openai_available': False,
+            'default_provider': 'basic',
+            'available_providers': ['basic']
+        })
+
 @app.route('/upload', methods=['POST'])
 def upload_file():
     try:
@@ -131,8 +170,48 @@ def upload_file():
         # Extract and analyze
         text = extract_text_from_pdf(filepath)
         questions = identify_questions(text)
-        chapters = analyze_chapters(text)
-        topics = extract_topics(text)
+        
+        # Use AI-powered analysis if available, otherwise fall back to basic keyword matching
+        use_ai = request.form.get('use_ai', 'true').lower() == 'true'
+        
+        if AI_ENABLED and use_ai:
+            logger.info(f"Using AI-powered analysis with provider: {DEFAULT_PROVIDER}")
+            try:
+                # AI-powered chapter and topic analysis
+                ai_chapters = analyze_chapters_ai(text)
+                ai_topics = extract_topics_ai(text)
+                
+                # Convert AI results to match expected format
+                chapters = ai_chapters.get('chapters', {})
+                topics = ai_topics
+                
+                # If AI didn't find much, supplement with basic analysis
+                if len(chapters) < 2:
+                    logger.info("AI found few chapters, supplementing with basic analysis")
+                    basic_chapters = analyze_chapters(text)
+                    for ch, count in basic_chapters.items():
+                        if ch not in chapters:
+                            chapters[ch] = count
+                
+                if len(topics) < 5:
+                    logger.info("AI found few topics, supplementing with basic analysis")
+                    basic_topics = extract_topics(text)
+                    for topic, count in basic_topics.items():
+                        if topic not in topics:
+                            topics[topic] = count
+                
+                analysis_method = f"ai_{DEFAULT_PROVIDER}"
+            except Exception as e:
+                logger.exception("AI analysis failed, falling back to basic analysis")
+                chapters = analyze_chapters(text)
+                topics = extract_topics(text)
+                analysis_method = "basic_fallback"
+        else:
+            # Basic keyword-based analysis
+            logger.info("Using basic keyword-based analysis")
+            chapters = analyze_chapters(text)
+            topics = extract_topics(text)
+            analysis_method = "basic"
 
         # cleanup
         try:
@@ -145,7 +224,9 @@ def upload_file():
             'total_questions': len(questions),
             'chapters': chapters,
             'topics': topics,
-            'sample_questions': questions[:5]
+            'sample_questions': questions[:5],
+            'analysis_method': analysis_method,  # Let frontend know which method was used
+            'ai_available': AI_ENABLED
         })
     except Exception as e:
         logger.exception("Unexpected error during upload")

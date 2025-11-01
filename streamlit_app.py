@@ -13,13 +13,22 @@ import PyPDF2
 import pandas as pd
 import plotly.express as px
 
-# Optional: import ai_utils if you implemented AI integration
+# Load environment variables
+from dotenv import load_dotenv
+load_dotenv()
+
+# Import AI utilities (new version)
 try:
-    from ai_utils import classify_questions_llm
+    from ai_utils import (
+        analyze_chapters_ai,
+        extract_topics_ai,
+        get_ai_status,
+        DEFAULT_PROVIDER
+    )
     AI_AVAILABLE = True
-except Exception:
-    classify_questions_llm = None
+except Exception as e:
     AI_AVAILABLE = False
+    print(f"AI utilities not available: {e}")
 
 # -- Config / Chapter keywords (same as backend) --
 CHAPTER_KEYWORDS = {
@@ -83,120 +92,209 @@ def extract_topics(text: str, top_n=20):
     return dict(counts.most_common(top_n))
 
 # -- Streamlit UI --
-st.set_page_config(layout="wide", page_title="Paper Analyzer")
+st.set_page_config(layout="wide", page_title="Paper Analyzer", page_icon="📄")
 
-st.title("📄 Paper Analyzer (Streamlit)")
-st.markdown("Upload PDF exam papers and get chapter/topic analytics. Optionally enable AI classification if OPENAI_API_KEY is set on the server.")
+st.title("📄 Paper Analyzer")
+st.markdown("### AI-powered exam paper analysis to help you study smarter!")
+
+# Sidebar for AI status
+with st.sidebar:
+    st.header("⚙️ AI Status")
+    if AI_AVAILABLE:
+        ai_status = get_ai_status()
+        if ai_status['gemini_available']:
+            st.success(f"✅ Google Gemini: Active")
+            st.caption(f"Provider: {ai_status['default_provider']}")
+        elif ai_status['openai_available']:
+            st.success(f"✅ OpenAI: Active")
+            st.caption(f"Provider: {ai_status['default_provider']}")
+        else:
+            st.info("ℹ️ Basic Mode (No AI)")
+    else:
+        st.warning("⚠️ AI not available - Using keyword matching")
+    
+    st.divider()
+    st.markdown("""
+    **Quick Links:**
+    - [Get Free Gemini API](https://makersuite.google.com/app/apikey)
+    - [GitHub Repository](https://github.com/thenakshprajapat/paper-analyzer)
+    """)
 
 col1, col2 = st.columns([1, 2])
 
 with col1:
-    uploaded_files = st.file_uploader("Upload one or more PDFs", type=["pdf"], accept_multiple_files=True)
-    use_ai = st.checkbox("Enable AI classification (uses backend ai_utils)", value=False)
-    if use_ai and not AI_AVAILABLE:
-        st.warning("AI utilities (ai_utils.py) not found or openai not configured. Falling back to heuristics.")
-    st.button("Analyze", key="analyze_button")
+    uploaded_files = st.file_uploader("📤 Upload PDF exam papers", type=["pdf"], accept_multiple_files=True)
+    use_ai = st.checkbox("Enable AI analysis", value=AI_AVAILABLE, disabled=not AI_AVAILABLE,
+                        help="AI provides more accurate chapter and topic detection")
+    analyze_clicked = st.button("🔍 Analyze Papers", key="analyze_button", type="primary")
 
 with col2:
-    st.info("Results will appear here after you click Analyze.")
+    if not uploaded_files:
+        st.info("👆 Upload one or more PDF files to get started!")
+    else:
+        st.info(f"📄 {len(uploaded_files)} file(s) ready to analyze")
 
-def run_analysis_on_bytes(file_bytes):
+def run_analysis_on_bytes(file_bytes, use_ai_param):
     text = extract_text_from_pdf_bytes(file_bytes)
     if text.startswith("ERROR:"):
         return {"error": text}
+    
     questions = identify_questions(text)
-    chapters_heuristic = analyze_chapters(text)
-    topics_heuristic = extract_topics(text, top_n=40)
-
-    ai_classifications = None
-    chapters_ai = {}
-    topics_ai = {}
-    if use_ai and AI_AVAILABLE and len(questions):
-        # classify with LLM (limit number of questions to avoid cost)
+    
+    # Use AI analysis if available and enabled
+    if use_ai_param and AI_AVAILABLE:
         try:
-            # take first 50 for example
-            q_batch = questions[:50]
-            ai_results = classify_questions_llm(q_batch)
-            ai_classifications = ai_results
-            # aggregate
-            chap_counter = Counter()
-            topic_counter = Counter()
-            for r in ai_results:
-                chap_counter[r.get('chapter', 'Unknown')] += 1
-                for t in r.get('topics', []):
-                    topic_counter[t.lower()] += 1
-            chapters_ai = dict(chap_counter)
-            topics_ai = dict(topic_counter.most_common(40))
+            # AI-powered analysis
+            ai_chapters_result = analyze_chapters_ai(text)
+            chapters = ai_chapters_result.get('chapters', {})
+            topics = extract_topics_ai(text)
+            
+            # Supplement with basic if AI didn't find much
+            if len(chapters) < 2:
+                basic_chapters = analyze_chapters(text)
+                for ch, count in basic_chapters.items():
+                    if ch not in chapters:
+                        chapters[ch] = count
+            
+            if len(topics) < 5:
+                basic_topics = extract_topics(text, top_n=20)
+                for topic, count in basic_topics.items():
+                    if topic not in topics:
+                        topics[topic] = count
+            
+            analysis_method = f"AI ({DEFAULT_PROVIDER})"
         except Exception as e:
-            st.error(f"AI classification failed: {e}")
+            st.warning(f"AI analysis failed: {e}. Using basic analysis.")
+            chapters = analyze_chapters(text)
+            topics = extract_topics(text, top_n=40)
+            analysis_method = "Basic (Keyword matching)"
+    else:
+        # Basic keyword analysis
+        chapters = analyze_chapters(text)
+        topics = extract_topics(text, top_n=40)
+        analysis_method = "Basic (Keyword matching)"
 
     return {
         "text": text,
         "questions": questions,
-        "chapters_heuristic": chapters_heuristic,
-        "topics_heuristic": topics_heuristic,
-        "chapters_ai": chapters_ai,
-        "topics_ai": topics_ai,
-        "ai_classifications": ai_classifications
+        "chapters": chapters,
+        "topics": topics,
+        "analysis_method": analysis_method
     }
 
-if uploaded_files:
+if uploaded_files and analyze_clicked:
     all_results = {}
     for f in uploaded_files:
-        with st.spinner(f"Analyzing {f.name}..."):
+        with st.spinner(f"🔄 Analyzing {f.name}..."):
             bytes_data = f.read()
-            res = run_analysis_on_bytes(bytes_data)
+            res = run_analysis_on_bytes(bytes_data, use_ai)
             all_results[f.name] = res
 
+    st.success(f"✅ Analysis complete!")
+    
     # Display summarized dashboard
-    st.header("📊 Summary")
+    st.header("📊 Analysis Results")
 
     # Aggregate over files
     agg_chapters = Counter()
     agg_topics = Counter()
+    analysis_methods = []
+    
     for fname, res in all_results.items():
-        if "chapters_ai" in res and res["chapters_ai"]:
-            for k, v in res["chapters_ai"].items():
-                agg_chapters[k] += v
-        else:
-            for k, v in res["chapters_heuristic"].items():
-                agg_chapters[k] += v
-        for k, v in res["topics_heuristic"].items():
+        if "error" in res:
+            st.error(f"Error in {fname}: {res['error']}")
+            continue
+        
+        analysis_methods.append(res.get("analysis_method", "Unknown"))
+        for k, v in res.get("chapters", {}).items():
+            agg_chapters[k] += v
+        for k, v in res.get("topics", {}).items():
             agg_topics[k] += v
 
-    if agg_chapters:
-        df_ch = pd.DataFrame({"chapter": list(agg_chapters.keys()), "count": list(agg_chapters.values())})
-        fig = px.bar(df_ch.sort_values("count", ascending=False), x="chapter", y="count", title="Chapter Frequency")
-        st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.info("No chapter keywords detected across uploads.")
+    # Show analysis method
+    if analysis_methods:
+        unique_methods = set(analysis_methods)
+        st.info(f"📊 Analysis Method: {', '.join(unique_methods)}")
 
-    if agg_topics:
-        df_tp = pd.DataFrame({"topic": list(agg_topics.keys()), "count": list(agg_topics.values())})
-        df_tp = df_tp.sort_values("count", ascending=False).head(20)
-        fig2 = px.bar(df_tp, x="count", y="topic", orientation="h", title="Top Topics")
-        st.plotly_chart(fig2, use_container_width=True)
+    col1, col2 = st.columns(2)
 
-    # Show per-file details (collapsible)
+    with col1:
+        if agg_chapters:
+            df_ch = pd.DataFrame({
+                "Chapter": list(agg_chapters.keys()),
+                "Score": list(agg_chapters.values())
+            })
+            df_ch = df_ch.sort_values("Score", ascending=False)
+            fig = px.bar(df_ch, x="Chapter", y="Score", 
+                        title="📚 Chapter Distribution",
+                        color="Score",
+                        color_continuous_scale="Purples")
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.warning("No chapters identified")
+
+    with col2:
+        if agg_topics:
+            df_tp = pd.DataFrame({
+                "Topic": list(agg_topics.keys()),
+                "Score": list(agg_topics.values())
+            })
+            df_tp = df_tp.sort_values("Score", ascending=False).head(15)
+            fig2 = px.bar(df_tp, x="Score", y="Topic", orientation="h",
+                         title="🎯 Top 15 Topics",
+                         color="Score",
+                         color_continuous_scale="Blues")
+            st.plotly_chart(fig2, use_container_width=True)
+        else:
+            st.warning("No topics identified")
+    
+    st.divider()
+
+    # Show per-file details
+    st.subheader("📄 Individual File Details")
     for fname, res in all_results.items():
-        with st.expander(f"{fname} — details"):
+        with st.expander(f"📋 {fname}"):
             if "error" in res:
                 st.error(res["error"])
                 continue
-            st.subheader("Sample questions")
-            for q in res["questions"][:10]:
-                st.markdown(f"- {q}")
-
-            st.subheader("Chapters (heuristic)")
-            st.json(res["chapters_heuristic"])
-
-            if use_ai and res.get("chapters_ai"):
-                st.subheader("Chapters (AI)")
-                st.json(res["chapters_ai"])
-                st.subheader("AI classifications (sample)")
-                st.json(res["ai_classifications"][:10])
-
-            st.subheader("Top heuristic topics")
-            st.json(dict(list(res["topics_heuristic"].items())[:30]))
+            
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Questions Found", len(res.get("questions", [])))
+            col2.metric("Chapters", len(res.get("chapters", {})))
+            col3.metric("Topics", len(res.get("topics", {})))
+            
+            if res.get("chapters"):
+                st.markdown("**Chapters:**")
+                for ch, score in list(res["chapters"].items())[:5]:
+                    st.write(f"- {ch}: {score:.2f}")
+            
+            if res.get("topics"):
+                st.markdown("**Top Topics:**")
+                topics_str = ", ".join([f"{t} ({s:.1f})" for t, s in list(res["topics"].items())[:10]])
+                st.write(topics_str)
+            
+            if res.get("questions"):
+                st.markdown("**Sample Questions:**")
+                for i, q in enumerate(res["questions"][:3], 1):
+                    st.caption(f"{i}. {q[:200]}...")
 else:
-    st.info("Upload one or more PDF files on the left and click Analyze.")
+    # Welcome screen
+    st.markdown("""
+    ### 🎯 How it works:
+    1. 📤 Upload your exam papers (PDF format)
+    2. 🤖 AI analyzes chapters, topics, and questions
+    3. 📊 View beautiful interactive charts
+    4. 📚 Get study recommendations
+    
+    ### ✨ Features:
+    - ✅ **AI-powered analysis** with Google Gemini
+    - ✅ **Interactive charts** with Plotly
+    - ✅ **Batch processing** - upload multiple papers
+    - ✅ **Smart topic extraction** - context-aware
+    - ✅ **Free to use** - Gemini free tier included
+    
+    ### 📝 Tips:
+    - Use complete exam papers for best results
+    - PDFs must have extractable text (not scanned images)
+    - Enable AI mode in sidebar for accurate analysis
+    """)

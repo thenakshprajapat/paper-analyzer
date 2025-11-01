@@ -2,3 +2,12 @@ Flask==3.0.0
 Flask-CORS==4.0.0
 PyPDF2==3.0.1
 Werkzeug==3.0.1
+
+# AI/LLM integrations (optional but recommended)
+google-generativeai>=0.3.0  # Google Gemini API (recommended - has free tier)
+openai>=1.3.0  # OpenAI API (optional)
+python-dotenv>=1.0.0  # For loading .env files with API keys
+
+# Streamlit UI (alternative to Flask)
+streamlit>=1.28.0
+plotly>=5.17.0  # For interactive charts in Streamlit
