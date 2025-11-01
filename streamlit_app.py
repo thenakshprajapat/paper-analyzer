@@ -85,9 +85,20 @@ def analyze_chapters(text: str):
     return dict(sorted(counts.items(), key=lambda x: x[1], reverse=True))
 
 def extract_topics(text: str, top_n=20):
-    stop_words = {'the','a','an','and','or','but','in','on','at','to','for','of','with','by','from','as','is','was','are','were','be','been','being','have','has','had','do','does','did','will','would','could','should','may','might','must','can','this','that','these','those','what','which','who','when','where','why','how','question','answer','marks','write','explain'}
-    words = re.findall(r'\b[a-z]{3,}\b', (text or "").lower())
-    filtered = [w for w in words if w not in stop_words]
+    # Comprehensive stopwords list including exam-specific AND generic science words
+    stop_words = {
+        # Common words
+        'the','a','an','and','or','but','in','on','at','to','for','of','with','by','from','as','is','was','are','were','be','been','being','have','has','had','do','does','did','will','would','could','should','may','might','must','can','this','that','these','those','what','which','who','when','where','why','how',
+        # Exam-specific stopwords
+        'question','answer','marks','write','explain','following','given','statement','true','false','correct','incorrect','both','either','neither','none','all','some','any','each','every','only',
+        'ncert','assertion','reason','explanation','column','section','choose','select','option','options',
+        # Generic science/academic words (too broad)
+        'energy','field','water','force','current','pressure','compound','solution','increases','decreases',
+        'magnetic','bone','concept','temperature','method','process','system','structure','level','rate',
+        'form','type','part','value','change','result','effect','cause','factor','element'
+    }
+    words = re.findall(r'\b[a-z]{4,}\b', (text or "").lower())  # Min 4 characters
+    filtered = [w for w in words if w not in stop_words and len(w) > 4]  # Filter 5+ char words
     counts = Counter(filtered)
     return dict(counts.most_common(top_n))
 

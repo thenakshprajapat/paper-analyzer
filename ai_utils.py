@@ -47,11 +47,22 @@ DEFAULT_PROVIDER = "gemini" if (GEMINI_AVAILABLE and GEMINI_API_KEY) else \
 
 # ===== Prompts =====
 ANALYSIS_SYSTEM_PROMPT = """You are an expert educational content analyzer specializing in exam paper analysis. 
-You identify academic chapters/subjects and extract key topics from exam questions with high precision."""
+You identify academic chapters/subjects and extract key technical/academic topics from exam questions with high precision.
 
-CHAPTER_ANALYSIS_PROMPT = """Analyze this exam paper text and identify the primary academic chapters/subjects covered.
+CRITICAL RULES:
+- Extract only meaningful academic/technical concepts (e.g., "Binary Search", "Photosynthesis", "Newton's Laws")
+- NEVER extract common words like: statement, given, following, correct, true, false, both, either, assertion, reason
+- NEVER extract question format words: ncert, column, section, marks, explain, write
+- Focus on multi-word technical terms (2-4 words preferred)
+- Prioritize subject-specific vocabulary and concepts"""
 
-Available chapters: Mathematics, Physics, Chemistry, Biology, Computer Science, English, History, Geography, Economics, Social Science, General Knowledge
+CHAPTER_ANALYSIS_PROMPT = """Analyze this exam paper text and identify the specific chapters, units, or sections that questions are from.
+
+Look for:
+- Chapter titles/names mentioned in questions (e.g., "Chapter 3: Data Structures")
+- Section headings or unit references
+- Topic groupings that indicate different chapters
+- Common chapter patterns like: Introduction, Fundamentals, Advanced Topics, Applications, etc.
 
 Text excerpt:
 \"\"\"
@@ -61,15 +72,26 @@ Text excerpt:
 Respond with a JSON object:
 {{
   "chapters": [
-    {{"name": "Chapter Name", "confidence": 0.95, "evidence": ["keyword1", "keyword2"]}},
+    {{"name": "Specific Chapter/Unit Name", "confidence": 0.95, "evidence": ["keyword1", "keyword2"]}},
     ...
   ],
-  "primary_subject": "Most likely subject"
+  "primary_subject": "Overall subject area"
 }}
 
-Focus on concrete evidence from the text. Be precise."""
+Be specific - extract actual chapter names from the paper, not just broad subjects. If no explicit chapter names exist, identify distinct topic areas (e.g., "Sorting Algorithms", "Database Management", "Object-Oriented Programming")."""
 
-TOPIC_EXTRACTION_PROMPT = """Extract the key topics and concepts from this exam paper text.
+TOPIC_EXTRACTION_PROMPT = """Extract ONLY specific academic concepts and named theories/laws/processes from this exam paper.
+
+STRICT RULES - Extract ONLY:
+✅ Named concepts: "Ohm's Law", "Photosynthesis", "Binary Search Tree", "Le Chatelier's Principle"
+✅ Technical processes: "Cellular Respiration", "Electrolysis", "Polymerization"  
+✅ Specific theories: "Darwin's Theory", "Quantum Mechanics", "Thermodynamics"
+✅ Named structures: "DNA Structure", "Benzene Ring", "Nervous System"
+
+❌ NEVER extract:
+- Single generic words: energy, water, field, force, current, pressure, solution, compound, bone
+- Common adjectives: magnetic, increases
+- Question words: statement, given, following, correct, assertion, reason
 
 Text excerpt:
 \"\"\"
@@ -79,16 +101,22 @@ Text excerpt:
 Respond with a JSON object:
 {{
   "topics": [
-    {{"topic": "specific topic name", "relevance": 0.9, "category": "chapter/subject"}},
+    {{"topic": "Specific Named Concept (2-5 words)", "relevance": 0.9, "category": "subject"}},
     ...
   ]
 }}
 
-Extract 10-20 most important topics. Be specific (e.g., "Quadratic Equations" not just "Math")."""
+GOOD: "Chemical Equilibrium", "Newton's Laws of Motion", "DNA Replication", "Redox Reactions"
+BAD: "energy", "water", "increases", "field", "current", "pressure"
 
-QUESTION_CLASSIFY_PROMPT = """Classify this exam question into a chapter and extract topics.
+Extract 8-12 SPECIFIC academic concepts only."""
 
-Chapters: Mathematics, Physics, Chemistry, Biology, Computer Science, English, History, Geography
+QUESTION_CLASSIFY_PROMPT = """Classify this exam question into a specific chapter/unit and extract topics.
+
+Look for chapter indicators like:
+- "Chapter X: ..."
+- Unit references
+- Topic area names
 
 Question:
 \"\"\"
@@ -97,10 +125,12 @@ Question:
 
 Respond with JSON:
 {{
-  "chapter": "Chapter Name",
-  "topics": ["topic1", "topic2", "topic3"],
+  "chapter": "Specific Chapter/Unit Name (not just subject)",
+  "topics": ["specific topic1", "specific topic2", "specific topic3"],
   "confidence": 0.85
-}}"""
+}}
+
+Be specific - identify the actual chapter/unit, not just the broad subject area."""
 
 
 # ===== AI Analysis Functions =====
