@@ -1,6 +1,6 @@
 """
 AI-powered analysis utilities for Paper Analyzer
-Supports Google Gemini (recommended, free tier) and OpenAI APIs
+Supports Groq (recommended, free & fast), Google Gemini, and OpenAI APIs
 """
 import os
 import time
@@ -13,6 +13,13 @@ from collections import Counter
 logger = logging.getLogger(__name__)
 
 # ===== API Client Imports =====
+try:
+    from groq import Groq
+    GROQ_AVAILABLE = True
+except ImportError:
+    GROQ_AVAILABLE = False
+    logger.info("groq not installed. Install with: pip install groq")
+
 try:
     import google.generativeai as genai
     GEMINI_AVAILABLE = True
@@ -28,10 +35,17 @@ except ImportError:
     logger.info("openai not installed. Install with: pip install openai")
 
 # ===== Configuration =====
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 
 # Configure APIs if keys are available
+if GROQ_AVAILABLE and GROQ_API_KEY:
+    groq_client = Groq(api_key=GROQ_API_KEY)
+    logger.info("Groq API configured")
+else:
+    groq_client = None
+
 if GEMINI_AVAILABLE and GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
     logger.info("Google Gemini API configured")
@@ -40,8 +54,9 @@ if OPENAI_AVAILABLE and OPENAI_API_KEY:
     openai.api_key = OPENAI_API_KEY
     logger.info("OpenAI API configured")
 
-# Default provider: prefer Gemini (free tier is generous), fallback to OpenAI, then basic heuristics
-DEFAULT_PROVIDER = "gemini" if (GEMINI_AVAILABLE and GEMINI_API_KEY) else \
+# Default provider: prefer Groq (free & fast), fallback to Gemini, then OpenAI, then basic heuristics
+DEFAULT_PROVIDER = "groq" if (GROQ_AVAILABLE and GROQ_API_KEY) else \
+                   "gemini" if (GEMINI_AVAILABLE and GEMINI_API_KEY) else \
                    "openai" if (OPENAI_AVAILABLE and OPENAI_API_KEY) else \
                    "basic"
 
@@ -56,25 +71,33 @@ Focus on:
 
 Avoid common words that don't represent specific topics."""
 
-CHAPTER_ANALYSIS_PROMPT = """Analyze this exam paper and identify chapters/topics.
+CHAPTER_ANALYSIS_PROMPT = """Analyze this exam paper text and identify which MAIN ACADEMIC SUBJECTS it covers.
 
 Text:
 {text}
 
-IMPORTANT: Respond with ONLY valid JSON, no markdown, no explanation. Use this exact format:
-{{"chapters": [{{"name": "Chapter Name", "confidence": 0.9, "evidence": ["keyword"]}}], "primary_subject": "Subject"}}
+You must classify into these standard subjects ONLY:
+- Physics
+- Chemistry  
+- Biology
+- Mathematics
+- Computer Science
+- English
+- History
+- Geography
 
-Extract actual chapter names or main topic areas from the paper."""
+Return JSON with this exact format:
+{{"chapters": [{{"name": "Physics", "confidence": 0.9}}, {{"name": "Chemistry", "confidence": 0.8}}], "primary_subject": "Physics"}}
 
-TOPIC_EXTRACTION_PROMPT = """Extract key academic topics from this exam paper.
+Use the subject names exactly as listed above. Do NOT use topic names like "Electromagnetism" or "Organic Chemistry" - use the main subject name."""
 
-Text:
+TOPIC_EXTRACTION_PROMPT = """From these academic terms, list the most specific and meaningful topics.
+
+Terms:
 {text}
 
-IMPORTANT: Respond with ONLY valid JSON, no markdown, no explanation. Use this exact format:
-{{"topics": [{{"topic": "Topic Name", "relevance": 0.9, "category": "subject"}}]}}
-
-Focus on specific academic concepts, technical terms, and named theories. Avoid generic words like water, energy, field."""
+Return JSON with format:
+{{"topics": [{{"topic": "Specific Topic", "relevance": 0.9}}]}}"""
 
 QUESTION_CLASSIFY_PROMPT = """Classify this exam question into a specific chapter/unit and extract topics.
 
@@ -119,7 +142,9 @@ def analyze_chapters_ai(text: str, provider: str = None, sample_size: int = 3000
     prompt = CHAPTER_ANALYSIS_PROMPT.format(text=text_sample)
     
     try:
-        if provider == "gemini":
+        if provider == "groq":
+            result = _call_groq(prompt, system_prompt="")
+        elif provider == "gemini":
             result = _call_gemini(prompt, system_prompt="")  # NO SYSTEM PROMPT
         elif provider == "openai":
             result = _call_openai(prompt, system_prompt="")  # NO SYSTEM PROMPT
@@ -139,6 +164,13 @@ def analyze_chapters_ai(text: str, provider: str = None, sample_size: int = 3000
             "primary_subject": data.get("primary_subject", "Unknown")
         }
     
+    except RuntimeError as e:
+        if "safety filter" in str(e).lower():
+            logger.warning(f"⚠️ Gemini safety filter triggered - falling back to basic analysis")
+            # Return empty so fallback analysis can be used
+            return {"chapters": {}, "primary_subject": "Unknown"}
+        raise
+    
     except Exception as e:
         logger.exception(f"AI chapter analysis failed with {provider}")
         return {"chapters": {}, "primary_subject": "Unknown"}
@@ -157,7 +189,9 @@ def extract_topics_ai(text: str, provider: str = None, sample_size: int = 3000) 
     prompt = TOPIC_EXTRACTION_PROMPT.format(text=text_sample)
     
     try:
-        if provider == "gemini":
+        if provider == "groq":
+            result = _call_groq(prompt, system_prompt="")
+        elif provider == "gemini":
             result = _call_gemini(prompt, system_prompt="")  # NO SYSTEM PROMPT
         elif provider == "openai":
             result = _call_openai(prompt, system_prompt="")  # NO SYSTEM PROMPT
@@ -174,6 +208,13 @@ def extract_topics_ai(text: str, provider: str = None, sample_size: int = 3000) 
                 topics[topic] = item.get("relevance", 0.5)
         
         return topics
+    
+    except RuntimeError as e:
+        if "safety filter" in str(e).lower():
+            logger.warning(f"⚠️ Gemini safety filter triggered - falling back to basic analysis")
+            # Return empty so fallback analysis can be used
+            return {}
+        raise
     
     except Exception as e:
         logger.exception(f"AI topic extraction failed with {provider}")
@@ -198,7 +239,9 @@ def classify_questions_ai(questions: List[str], provider: str = None, max_questi
         prompt = QUESTION_CLASSIFY_PROMPT.format(question=q[:500])  # limit question length
         
         try:
-            if provider == "gemini":
+            if provider == "groq":
+                result = _call_groq(prompt, system_prompt=ANALYSIS_SYSTEM_PROMPT)
+            elif provider == "gemini":
                 result = _call_gemini(prompt, system_prompt=ANALYSIS_SYSTEM_PROMPT)
             elif provider == "openai":
                 result = _call_openai(prompt, system_prompt=ANALYSIS_SYSTEM_PROMPT)
@@ -223,6 +266,26 @@ def classify_questions_ai(questions: List[str], provider: str = None, max_questi
 
 
 # ===== API Call Helpers =====
+
+def _call_groq(prompt: str, system_prompt: str = "", model: str = "llama-3.3-70b-versatile") -> str:
+    """Call Groq API (FREE & FAST alternative to Gemini)"""
+    if not GROQ_AVAILABLE or not GROQ_API_KEY:
+        raise RuntimeError("Groq not available")
+    
+    messages = []
+    if system_prompt:
+        messages.append({"role": "system", "content": system_prompt})
+    messages.append({"role": "user", "content": prompt})
+    
+    response = groq_client.chat.completions.create(
+        model=model,
+        messages=messages,
+        temperature=0.1,
+        max_tokens=2000,
+    )
+    
+    return response.choices[0].message.content
+
 
 def _call_gemini(prompt: str, system_prompt: str = "", model: str = "gemini-2.5-flash") -> str:
     """Call Google Gemini API"""
@@ -285,18 +348,53 @@ def _call_openai(prompt: str, system_prompt: str = "", model: str = "gpt-3.5-tur
 # ===== Utility Functions =====
 
 def _sample_text(text: str, max_chars: int = 3000) -> str:
-    """Take strategic samples from text to fit token limits"""
-    if len(text) <= max_chars:
-        return text
+    """Take strategic samples and HEAVILY sanitize to avoid safety filters"""
+    import re
     
-    # Take beginning, middle, and end samples
-    chunk_size = max_chars // 3
-    start = text[:chunk_size]
-    middle_pos = len(text) // 2 - chunk_size // 2
-    middle = text[middle_pos:middle_pos + chunk_size]
-    end = text[-chunk_size:]
+    # AGGRESSIVE CLEANING - Extract only question-like content and keywords
     
-    return f"{start}\n\n[...middle section...]\n\n{middle}\n\n[...]\n\n{end}"
+    # Step 1: Extract sentences that look like questions
+    sentences = re.findall(r'[A-Z][^.!?]*[.!?]', text or "")
+    question_sentences = [s for s in sentences if any(word in s.lower() for word in 
+                         ['what', 'which', 'how', 'why', 'define', 'explain', 'describe', 'calculate', 'find', 'state', 'write', 'draw', 'show'])]
+    
+    # Step 2: Extract capitalized terms (topics/concepts)
+    capitalized = re.findall(r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2})\b', text or "")
+    
+    # Step 3: Extract scientific-looking words (long, specific)
+    scientific_words = re.findall(r'\b([a-z]{8,})\b', (text or "").lower())
+    scientific_filtered = [w for w in scientific_words if any(suffix in w for suffix in 
+                          ['tion', 'ism', 'magnetic', 'electric', 'chemical', 'mechanical', 'metric', 'scope'])]
+    
+    # Combine into clean text (just keywords and concepts)
+    clean_parts = []
+    
+    # Add some question samples
+    if question_sentences:
+        clean_parts.extend(question_sentences[:5])  # Max 5 questions
+    
+    # Add unique capitalized terms (topics)
+    unique_caps = list(set(capitalized))[:20]  # Max 20 terms
+    clean_parts.append("Topics found: " + ", ".join(unique_caps))
+    
+    # Add scientific terms
+    unique_sci = list(set(scientific_filtered))[:15]  # Max 15 terms
+    clean_parts.append("Scientific terms: " + ", ".join(unique_sci))
+    
+    # Join and limit
+    cleaned = " ".join(clean_parts)
+    
+    # Final sanitization
+    cleaned = re.sub(r'http[s]?://\S+', '', cleaned)
+    cleaned = re.sub(r'\S+@\S+', '', cleaned)
+    cleaned = re.sub(r'\s+', ' ', cleaned)
+    cleaned = re.sub(r'[^\w\s\.\,\?\!\-\:\;\(\)]', '', cleaned)
+    
+    # Trim to max length
+    if len(cleaned) > max_chars:
+        cleaned = cleaned[:max_chars] + "..."
+    
+    return cleaned
 
 
 def _extract_json(text: str) -> Dict:
@@ -342,6 +440,8 @@ def _extract_json(text: str) -> Dict:
 def get_available_providers() -> List[str]:
     """Return list of available AI providers"""
     providers = []
+    if GROQ_AVAILABLE and GROQ_API_KEY:
+        providers.append("groq")
     if GEMINI_AVAILABLE and GEMINI_API_KEY:
         providers.append("gemini")
     if OPENAI_AVAILABLE and OPENAI_API_KEY:
@@ -353,6 +453,7 @@ def get_available_providers() -> List[str]:
 def get_ai_status() -> Dict:
     """Return status of AI integrations"""
     return {
+        "groq_available": GROQ_AVAILABLE and bool(GROQ_API_KEY),
         "gemini_available": GEMINI_AVAILABLE and bool(GEMINI_API_KEY),
         "openai_available": OPENAI_AVAILABLE and bool(OPENAI_API_KEY),
         "default_provider": DEFAULT_PROVIDER,

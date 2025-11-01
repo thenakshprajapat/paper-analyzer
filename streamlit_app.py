@@ -30,12 +30,35 @@ except Exception as e:
     AI_AVAILABLE = False
     print(f"AI utilities not available: {e}")
 
+# Import enhanced PDF extraction with OCR
+try:
+    from pdf_extractor import extract_text_with_ocr, is_ocr_available
+    PDF_OCR_AVAILABLE = True
+except ImportError:
+    PDF_OCR_AVAILABLE = False
+    print("OCR-enhanced PDF extraction not available")
+
 # -- Config / Chapter keywords (same as backend) --
 CHAPTER_KEYWORDS = {
-    'Mathematics': ['algebra', 'calculus', 'geometry', 'trigonometry', 'statistics', 'probability'],
-    'Physics': ['mechanics', 'thermodynamics', 'optics', 'electromagnetism', 'waves', 'quantum'],
-    'Chemistry': ['organic', 'inorganic', 'physical chemistry', 'chemical bonding', 'equilibrium'],
-    'Biology': ['cell', 'genetics', 'evolution', 'ecology', 'physiology', 'botany', 'zoology'],
+    'Mathematics': [
+        'algebra', 'calculus', 'geometry', 'trigonometry', 'statistics', 'probability', 
+        'integration', 'differentiation', 'vector', 'matrix', 'equation', 'derivative'
+    ],
+    'Physics': [
+        'mechanics', 'thermodynamics', 'optics', 'electromagnetism', 'waves', 'quantum',
+        'motion', 'velocity', 'acceleration', 'momentum', 'force', 'friction',
+        'circuit', 'resistance', 'capacitor', 'voltage', 'current', 'magnetic'
+    ],
+    'Chemistry': [
+        'organic', 'inorganic', 'equilibrium', 'acid', 'base', 'reaction', 'molecule', 'atom',
+        'catalyst', 'oxidation', 'reduction', 'titration', 'solution', 'compound',
+        'element', 'periodic', 'ionic', 'covalent', 'synthesis', 'chemical'
+    ],
+    'Biology': [
+        'cell', 'genetics', 'evolution', 'ecology', 'physiology', 'anatomy', 'tissue', 'organ',
+        'kidney', 'excretion', 'skeletal', 'muscle', 'respiration', 'photosynthesis',
+        'enzyme', 'protein', 'dna', 'chromosome', 'mitosis', 'reproduction'
+    ],
     'Computer Science': ['programming', 'algorithms', 'data structures', 'database', 'networks', 'operating system', 'python'],
     'English': ['grammar', 'comprehension', 'literature', 'writing', 'vocabulary'],
     'History': ['ancient', 'medieval', 'modern', 'civilization', 'revolution', 'war'],
@@ -44,7 +67,15 @@ CHAPTER_KEYWORDS = {
 
 # -- Helpers (same logic as backend) --
 def extract_text_from_pdf_bytes(file_bytes: bytes) -> str:
+    """Extract text from PDF with OCR support for image-heavy papers."""
     try:
+        # Use enhanced OCR extraction if available
+        if PDF_OCR_AVAILABLE:
+            text = extract_text_with_ocr(file_bytes, use_ocr=True)
+            if text and len(text.strip()) > 100:
+                return text
+        
+        # Fallback to simple PyPDF2 extraction
         reader = PyPDF2.PdfReader(io.BytesIO(file_bytes))
         text_parts = []
         for page in reader.pages:
@@ -74,6 +105,7 @@ def identify_questions(text: str):
     return [line.strip() for line in text.splitlines() if line.strip()]
 
 def analyze_chapters(text: str):
+    """Analyze chapters with normalized scoring to handle different keyword list sizes"""
     t = (text or "").lower()
     counts = {}
     for chapter, keywords in CHAPTER_KEYWORDS.items():
@@ -81,25 +113,55 @@ def analyze_chapters(text: str):
         for kw in keywords:
             c += len(re.findall(r'\b' + re.escape(kw.lower()) + r'\b', t))
         if c:
-            counts[chapter] = c
+            # Normalize by number of keywords to prevent bias
+            normalized_score = c * (20 / len(keywords))  # Normalize to 20 keywords baseline
+            counts[chapter] = round(normalized_score, 1)
     return dict(sorted(counts.items(), key=lambda x: x[1], reverse=True))
 
 def extract_topics(text: str, top_n=20):
-    # Comprehensive stopwords list including exam-specific AND generic science words
-    stop_words = {
-        # Common words
-        'the','a','an','and','or','but','in','on','at','to','for','of','with','by','from','as','is','was','are','were','be','been','being','have','has','had','do','does','did','will','would','could','should','may','might','must','can','this','that','these','those','what','which','who','when','where','why','how',
-        # Exam-specific stopwords
-        'question','answer','marks','write','explain','following','given','statement','true','false','correct','incorrect','both','either','neither','none','all','some','any','each','every','only',
-        'ncert','assertion','reason','explanation','column','section','choose','select','option','options',
-        # Generic science/academic words (too broad)
-        'energy','field','water','force','current','pressure','compound','solution','increases','decreases',
-        'magnetic','bone','concept','temperature','method','process','system','structure','level','rate',
-        'form','type','part','value','change','result','effect','cause','factor','element'
-    }
-    words = re.findall(r'\b[a-z]{4,}\b', (text or "").lower())  # Min 4 characters
-    filtered = [w for w in words if w not in stop_words and len(w) > 4]  # Filter 5+ char words
-    counts = Counter(filtered)
+    """Extract meaningful topics using pattern matching for scientific terms"""
+    
+    # Extract capitalized terms (proper nouns, scientific names)
+    capitalized_terms = re.findall(r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2})\b', text or "")
+    
+    # Extract hyphenated scientific terms
+    hyphenated = re.findall(r'\b([a-z]+(?:-[a-z]+)+)\b', (text or "").lower())
+    
+    # Extract specific scientific patterns
+    scientific_patterns = [
+        r'\b(\w*magnetic\w*)\b',
+        r'\b(\w*electric\w*)\b', 
+        r'\b(\w*thermal\w*)\b',
+        r'\b(\w*mechanical\w*)\b',
+        r'\b(\w*chemical\w*)\b',
+        r'\b(\w*biological\w*)\b',
+        r'\b(\w*synthesis\w*)\b',
+        r'\b(\w*metabolism\w*)\b',
+        r'\b(\w*equilibrium\w*)\b',
+        r'\b(\w*induction\w*)\b',
+        r'\b(\w*oscillation\w*)\b',
+        r'\b(\w*excretion\w*)\b',
+        r'\b(\w*skeletal\w*)\b',
+        r'\b(\w*muscular\w*)\b',
+        r'\b(\w*circulation\w*)\b',
+        r'\b(\w*respiration\w*)\b',
+        r'\b(\w*photosynthesis\w*)\b',
+    ]
+    
+    scientific_words = []
+    for pattern in scientific_patterns:
+        matches = re.findall(pattern, (text or "").lower(), re.IGNORECASE)
+        scientific_words.extend(matches)
+    
+    # Combine all
+    all_terms = (
+        [t.strip() for t in capitalized_terms if len(t) > 8] +  # Long proper nouns
+        [h for h in hyphenated if len(h) > 6] +  # Hyphenated terms
+        [s for s in scientific_words if len(s) > 5]  # Scientific terms
+    )
+    
+    # Count and return
+    counts = Counter([t.lower() for t in all_terms if t])
     return dict(counts.most_common(top_n))
 
 # -- Streamlit UI --
@@ -108,26 +170,46 @@ st.set_page_config(layout="wide", page_title="Paper Analyzer", page_icon="📄")
 st.title("📄 Paper Analyzer")
 st.markdown("### AI-powered exam paper analysis to help you study smarter!")
 
+# Show OCR status banner
+if PDF_OCR_AVAILABLE and is_ocr_available():
+    st.success("🔍 **OCR Enabled**: Can extract text from image-heavy PDFs (Physics diagrams, charts, etc.)")
+else:
+    st.info("📝 **OCR Disabled**: Install OCR support for better Physics/image paper extraction - See instructions below")
+    with st.expander("📦 How to enable OCR support"):
+        st.code("""
+# Install OCR dependencies:
+pip install pdf2image pytesseract pillow
+
+# Also install Tesseract OCR engine:
+# Windows: Download from https://github.com/UB-Mannheim/tesseract/wiki
+# Mac: brew install tesseract
+# Linux: sudo apt-get install tesseract-ocr
+        """, language="bash")
+
 # Sidebar for AI status
 with st.sidebar:
     st.header("⚙️ AI Status")
     if AI_AVAILABLE:
         ai_status = get_ai_status()
-        if ai_status['gemini_available']:
-            st.success(f"✅ Google Gemini: Active")
-            st.caption(f"Provider: {ai_status['default_provider']}")
+        if ai_status['groq_available']:
+            st.success(f"✅ Groq AI: Active (FREE & FAST!)")
+            st.caption(f"Model: Llama 3.3 70B")
+        elif ai_status['gemini_available']:
+            st.warning(f"⚠️ Gemini Active (may block content)")
+            st.caption("Consider switching to Groq")
         elif ai_status['openai_available']:
             st.success(f"✅ OpenAI: Active")
             st.caption(f"Provider: {ai_status['default_provider']}")
         else:
-            st.info("ℹ️ Basic Mode (No AI)")
+            st.info("ℹ️ Pattern-Based Mode (No AI)")
     else:
-        st.warning("⚠️ AI not available - Using keyword matching")
+        st.warning("⚠️ AI not available - Using pattern matching")
     
     st.divider()
     st.markdown("""
-    **Quick Links:**
-    - [Get Free Gemini API](https://makersuite.google.com/app/apikey)
+    **Setup AI (FREE):**
+    - [Get Groq API](https://console.groq.com/keys) ⭐ **RECOMMENDED**
+    - [Get Gemini API](https://makersuite.google.com/app/apikey) (may block)
     - [GitHub Repository](https://github.com/thenakshprajapat/paper-analyzer)
     """)
 
@@ -235,12 +317,25 @@ if uploaded_files and analyze_clicked:
                 "Chapter": list(agg_chapters.keys()),
                 "Score": list(agg_chapters.values())
             })
-            df_ch = df_ch.sort_values("Score", ascending=False)
-            fig = px.bar(df_ch, x="Chapter", y="Score", 
+            
+            # Normalize scores to percentages for better visualization
+            total_score = df_ch["Score"].sum()
+            if total_score > 0:
+                df_ch["Percentage"] = (df_ch["Score"] / total_score * 100).round(1)
+                df_ch = df_ch.sort_values("Percentage", ascending=False)
+            else:
+                df_ch["Percentage"] = 0
+                df_ch = df_ch.sort_values("Score", ascending=False)
+            
+            # Use discrete colors for chapters
+            fig = px.bar(df_ch, x="Chapter", y="Percentage", 
                         title="📚 Chapter Distribution",
-                        color="Score",
-                        color_continuous_scale="Purples")
-            st.plotly_chart(fig, use_container_width=True)
+                        color="Chapter",
+                        color_discrete_sequence=px.colors.qualitative.Bold,
+                        labels={"Percentage": "Coverage (%)"})
+            fig.update_layout(showlegend=False)  # Hide legend since x-axis shows names
+            fig.update_traces(texttemplate='%{y:.1f}%', textposition='outside')
+            st.plotly_chart(fig, width='stretch')
         else:
             st.warning("No chapters identified")
 
@@ -251,11 +346,22 @@ if uploaded_files and analyze_clicked:
                 "Score": list(agg_topics.values())
             })
             df_tp = df_tp.sort_values("Score", ascending=False).head(15)
-            fig2 = px.bar(df_tp, x="Score", y="Topic", orientation="h",
+            
+            # Normalize to show relative importance
+            max_score = df_tp["Score"].max()
+            if max_score > 0:
+                df_tp["Relevance"] = (df_tp["Score"] / max_score).round(3)
+            else:
+                df_tp["Relevance"] = 0
+            
+            # Use gradient colors for topics (keeps the nice gradient effect)
+            fig2 = px.bar(df_tp, x="Relevance", y="Topic", orientation="h",
                          title="🎯 Top 15 Topics",
-                         color="Score",
-                         color_continuous_scale="Blues")
-            st.plotly_chart(fig2, use_container_width=True)
+                         color="Relevance",
+                         color_continuous_scale="teal",
+                         labels={"Relevance": "Relevance Score"})
+            fig2.update_layout(yaxis={'categoryorder':'total ascending'})  # Order by score
+            st.plotly_chart(fig2, width='stretch')
         else:
             st.warning("No topics identified")
     
