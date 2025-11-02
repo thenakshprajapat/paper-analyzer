@@ -1,14 +1,16 @@
 [theme]
-primaryColor="#667eea"
+# Modern purple gradient theme - student-friendly!
+primaryColor="#764ba2"
 backgroundColor="#ffffff"
-secondaryBackgroundColor="#f0f2f6"
-textColor="#262730"
+secondaryBackgroundColor="#f7f9fc"
+textColor="#1a1a1a"
 font="sans serif"
 
 [server]
 port=8501
-enableCORS=false
+enableCORS=true
 enableXsrfProtection=true
+maxUploadSize=200
 
 [browser]
 gatherUsageStats=false

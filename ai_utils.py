@@ -71,33 +71,72 @@ Focus on:
 
 Avoid common words that don't represent specific topics."""
 
-CHAPTER_ANALYSIS_PROMPT = """Analyze this exam paper text and identify which MAIN ACADEMIC SUBJECTS it covers.
+CHAPTER_ANALYSIS_PROMPT = """You are analyzing an exam paper that may contain MULTIPLE subjects. Carefully read the text and identify ALL academic subjects present.
 
-Text:
+Text from exam paper:
 {text}
 
-You must classify into these standard subjects ONLY:
+CRITICAL INSTRUCTIONS:
+1. **Scan the ENTIRE text** - look for keywords, terminology, and concepts from different subjects
+2. **Return ALL subjects found** - Papers often mix Physics, Chemistry, and Biology!
+3. **Assign confidence** based on how much content belongs to each subject (doesn't need to be 100% total)
+4. **Look for these indicators:**
+   - Physics: circuit, force, electromagnetic, induction, motion, resistance, voltage, current, magnetic, lens, waves
+   - Chemistry: reaction, molecule, acid, base, equilibrium, titration, oxidation, pH, compound, element, ion
+   - Biology: cell, tissue, organ, genetics, digestion, respiration, skeletal, kidney, excretion, enzyme, protein
+   - Computer Science: Python, code, algorithm, function, database, SQL, programming, data structure
+   - Mathematics: equation, derivative, integral, algebra, geometry, statistics
+
+5. **DO NOT skip subjects** - if you find even 2-3 questions from a subject, include it!
+6. **Use subject names EXACTLY as listed**
+
+Valid subject names:
 - Physics
-- Chemistry  
+- Chemistry
 - Biology
-- Mathematics
 - Computer Science
+- Mathematics
 - English
 - History
 - Geography
 
-Return JSON with this exact format:
-{{"chapters": [{{"name": "Physics", "confidence": 0.9}}, {{"name": "Chemistry", "confidence": 0.8}}], "primary_subject": "Physics"}}
+Return JSON with ALL subjects found:
+{{"chapters": [{{"name": "Physics", "confidence": 0.45}}, {{"name": "Chemistry", "confidence": 0.35}}, {{"name": "Biology", "confidence": 0.20}}], "primary_subject": "Physics"}}
 
-Use the subject names exactly as listed above. Do NOT use topic names like "Electromagnetism" or "Organic Chemistry" - use the main subject name."""
+**IMPORTANT:** If the paper covers multiple subjects (like a science paper with Physics, Chemistry, AND Biology), list ALL of them! Don't be conservative!"""
 
-TOPIC_EXTRACTION_PROMPT = """From these academic terms, list the most specific and meaningful topics.
+TOPIC_EXTRACTION_PROMPT = """Extract the TOP 15-20 most important and specific academic topics/concepts from this exam paper.
 
-Terms:
+Content:
 {text}
 
-Return JSON with format:
-{{"topics": [{{"topic": "Specific Topic", "relevance": 0.9}}]}}"""
+IMPORTANT RULES:
+1. Extract FULL, DESCRIPTIVE topic names that students would recognize
+2. Use 2-4 words per topic (e.g., "Object-Oriented Programming", "Database Normalization", "Exception Handling")
+3. Capitalize properly (e.g., "Python Programming", not "python programming")
+4. For CS: Include language/tech names (e.g., "SQL Queries", "Python Functions", "Database Joins")
+5. For Physics: Include full concepts (e.g., "Electromagnetic Induction", not just "induction")
+6. For Chemistry: Include full names (e.g., "Chemical Equilibrium", not just "equilibrium")
+7. For Biology: Include system names (e.g., "Human Digestive System", not just "digestion")
+8. Avoid single generic words (e.g., ❌ "functions", ❌ "system", ❌ "operations")
+9. Extract 15-20 topics that a student would write in their notes
+
+GOOD EXAMPLES:
+✅ "Python Programming"
+✅ "SQL Database Management"  
+✅ "Object-Oriented Programming"
+✅ "Boolean Logic Operations"
+✅ "Exception Handling Techniques"
+✅ "Data Structure Implementation"
+
+BAD EXAMPLES:
+❌ "programming" (too generic)
+❌ "SQL" (too short)
+❌ "functions" (needs context like "Python Functions")
+❌ "operations" (needs context like "Bitwise Operations")
+
+Return JSON with 15-20 specific, student-friendly topics:
+{{"topics": [{{"topic": "Python Programming Fundamentals", "relevance": 0.95}}, {{"topic": "SQL Database Operations", "relevance": 0.88}}]}}"""
 
 QUESTION_CLASSIFY_PROMPT = """Classify this exam question into a specific chapter/unit and extract topics.
 
@@ -123,7 +162,7 @@ Be specific - identify the actual chapter/unit, not just the broad subject area.
 
 # ===== AI Analysis Functions =====
 
-def analyze_chapters_ai(text: str, provider: str = None, sample_size: int = 3000) -> Dict:
+def analyze_chapters_ai(text: str, provider: str = None, sample_size: int = 12000) -> Dict:
     """
     Use AI to analyze and identify chapters in exam paper text.
     
@@ -176,7 +215,7 @@ def analyze_chapters_ai(text: str, provider: str = None, sample_size: int = 3000
         return {"chapters": {}, "primary_subject": "Unknown"}
 
 
-def extract_topics_ai(text: str, provider: str = None, sample_size: int = 3000) -> Dict[str, float]:
+def extract_topics_ai(text: str, provider: str = None, sample_size: int = 6000) -> Dict[str, float]:
     """
     Use AI to extract key topics from exam paper text.
     
@@ -347,47 +386,35 @@ def _call_openai(prompt: str, system_prompt: str = "", model: str = "gpt-3.5-tur
 
 # ===== Utility Functions =====
 
-def _sample_text(text: str, max_chars: int = 3000) -> str:
-    """Take strategic samples and HEAVILY sanitize to avoid safety filters"""
-    import re
+def _sample_text(text: str, max_chars: int = 12000) -> str:
+    """Sample text from ENTIRE document to catch all subjects (Physics, Chemistry, Biology)"""
+    if not text:
+        return ""
     
-    # AGGRESSIVE CLEANING - Extract only question-like content and keywords
+    # For papers with multiple subjects, we need samples from BEGINNING, MIDDLE, and END
+    text_len = len(text)
     
-    # Step 1: Extract sentences that look like questions
-    sentences = re.findall(r'[A-Z][^.!?]*[.!?]', text or "")
-    question_sentences = [s for s in sentences if any(word in s.lower() for word in 
-                         ['what', 'which', 'how', 'why', 'define', 'explain', 'describe', 'calculate', 'find', 'state', 'write', 'draw', 'show'])]
+    if text_len <= max_chars:
+        # Small enough to send whole thing
+        return text
     
-    # Step 2: Extract capitalized terms (topics/concepts)
-    capitalized = re.findall(r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2})\b', text or "")
+    # Take samples from different sections to catch all subjects
+    chunk_size = max_chars // 3  # Divide into 3 parts
     
-    # Step 3: Extract scientific-looking words (long, specific)
-    scientific_words = re.findall(r'\b([a-z]{8,})\b', (text or "").lower())
-    scientific_filtered = [w for w in scientific_words if any(suffix in w for suffix in 
-                          ['tion', 'ism', 'magnetic', 'electric', 'chemical', 'mechanical', 'metric', 'scope'])]
+    # Beginning (first subject - usually Physics)
+    beginning = text[:chunk_size]
     
-    # Combine into clean text (just keywords and concepts)
-    clean_parts = []
+    # Middle (second subject - usually Chemistry)  
+    middle_start = text_len // 2 - chunk_size // 2
+    middle = text[middle_start:middle_start + chunk_size]
     
-    # Add some question samples
-    if question_sentences:
-        clean_parts.extend(question_sentences[:5])  # Max 5 questions
+    # End (third subject - usually Biology)
+    end = text[-chunk_size:]
     
-    # Add unique capitalized terms (topics)
-    unique_caps = list(set(capitalized))[:20]  # Max 20 terms
-    clean_parts.append("Topics found: " + ", ".join(unique_caps))
+    # Combine all three sections
+    combined = beginning + "\n\n[... middle section ...]\n\n" + middle + "\n\n[... end section ...]\n\n" + end
     
-    # Add scientific terms
-    unique_sci = list(set(scientific_filtered))[:15]  # Max 15 terms
-    clean_parts.append("Scientific terms: " + ", ".join(unique_sci))
-    
-    # Join and limit
-    cleaned = " ".join(clean_parts)
-    
-    # Final sanitization
-    cleaned = re.sub(r'http[s]?://\S+', '', cleaned)
-    cleaned = re.sub(r'\S+@\S+', '', cleaned)
-    cleaned = re.sub(r'\s+', ' ', cleaned)
+    return combined[:max_chars]
     cleaned = re.sub(r'[^\w\s\.\,\?\!\-\:\;\(\)]', '', cleaned)
     
     # Trim to max length
