@@ -1,6 +1,6 @@
 """
-Simple Streamlit frontend for the Paper Analyzer.
-Save as streamlit_app.py and run: streamlit run streamlit_app.py
+Modern Streamlit frontend for the Paper Analyzer.
+Run: streamlit run streamlit_app.py
 """
 
 import os
@@ -9,7 +9,6 @@ from collections import Counter
 import io
 
 import streamlit as st
-import PyPDF2
 import pandas as pd
 import plotly.express as px
 
@@ -17,11 +16,24 @@ import plotly.express as px
 from dotenv import load_dotenv
 load_dotenv()
 
-# Import AI utilities (new version)
+# Import PyPDF2 safely
+try:
+    import PyPDF2
+    PYPDF2_AVAILABLE = True
+except ImportError:
+    try:
+        import pypdf as PyPDF2
+        PYPDF2_AVAILABLE = True
+    except ImportError:
+        PyPDF2 = None
+        PYPDF2_AVAILABLE = False
+
+# Import AI utilities
 try:
     from ai_utils import (
         analyze_chapters_ai,
         extract_topics_ai,
+        craft_high_probability_questions,
         get_ai_status,
         DEFAULT_PROVIDER
     )
@@ -32,13 +44,13 @@ except Exception as e:
 
 # Import enhanced PDF extraction with OCR
 try:
-    from pdf_extractor import extract_text_with_ocr, is_ocr_available
+    from pdf_extractor import extract_text_with_ocr, is_ocr_available, extract_structured_questions
     PDF_OCR_AVAILABLE = True
 except ImportError:
     PDF_OCR_AVAILABLE = False
     print("OCR-enhanced PDF extraction not available")
 
-# -- Config / Chapter keywords (same as backend) --
+# -- Config / Chapter keywords --
 CHAPTER_KEYWORDS = {
     'Mathematics': [
         'algebra', 'calculus', 'geometry', 'trigonometry', 'statistics', 'probability', 
@@ -59,34 +71,39 @@ CHAPTER_KEYWORDS = {
         'kidney', 'excretion', 'skeletal', 'muscle', 'respiration', 'photosynthesis',
         'enzyme', 'protein', 'dna', 'chromosome', 'mitosis', 'reproduction'
     ],
-    'Computer Science': ['programming', 'algorithms', 'data structures', 'database', 'networks', 'operating system', 'python'],
+    'Computer Science': ['programming', 'algorithms', 'data structures', 'database', 'networks', 'operating system', 'python', 'sql'],
     'English': ['grammar', 'comprehension', 'literature', 'writing', 'vocabulary'],
     'History': ['ancient', 'medieval', 'modern', 'civilization', 'revolution', 'war'],
     'Geography': ['physical geography', 'human geography', 'climate', 'maps', 'resources']
 }
 
-# -- Helpers (same logic as backend) --
+# -- Helpers --
 def extract_text_from_pdf_bytes(file_bytes: bytes) -> str:
     """Extract text from PDF with OCR support for image-heavy papers."""
     try:
-        # Use enhanced OCR extraction if available
         if PDF_OCR_AVAILABLE:
             text = extract_text_with_ocr(file_bytes, use_ocr=True)
             if text and len(text.strip()) > 100:
                 return text
         
-        # Fallback to simple PyPDF2 extraction
-        reader = PyPDF2.PdfReader(io.BytesIO(file_bytes))
-        text_parts = []
-        for page in reader.pages:
-            page_text = page.extract_text()
-            if page_text:
-                text_parts.append(page_text)
-        return "\n".join(text_parts)
+        if PYPDF2_AVAILABLE and PyPDF2 is not None:
+            reader = PyPDF2.PdfReader(io.BytesIO(file_bytes))
+            text_parts = []
+            for page in reader.pages:
+                page_text = page.extract_text()
+                if page_text:
+                    text_parts.append(page_text)
+            return "\n".join(text_parts)
+        return ""
     except Exception as e:
         return f"ERROR: {e}"
 
 def identify_questions(text: str):
+    if PDF_OCR_AVAILABLE:
+        structured = extract_structured_questions(text)
+        if structured:
+            return [q["text"] for q in structured]
+            
     question_patterns = [
         r'Q\s*\d+[\.\):]',
         r'Question\s*\d+[\.\):]',
@@ -102,7 +119,7 @@ def identify_questions(text: str):
             questions.append(q)
     if questions:
         return questions
-    return [line.strip() for line in text.splitlines() if line.strip()]
+    return [line.strip() for line in text.splitlines() if len(line.strip()) > 20]
 
 def analyze_chapters(text: str):
     """Analyze chapters with normalized scoring to handle different keyword list sizes"""
@@ -113,21 +130,15 @@ def analyze_chapters(text: str):
         for kw in keywords:
             c += len(re.findall(r'\b' + re.escape(kw.lower()) + r'\b', t))
         if c:
-            # Normalize by number of keywords to prevent bias
-            normalized_score = c * (20 / len(keywords))  # Normalize to 20 keywords baseline
+            normalized_score = c * (20 / len(keywords))
             counts[chapter] = round(normalized_score, 1)
     return dict(sorted(counts.items(), key=lambda x: x[1], reverse=True))
 
 def extract_topics(text: str, top_n=20):
-    """Extract meaningful topics using pattern matching for scientific terms"""
-    
-    # Extract capitalized terms (proper nouns, scientific names)
-    capitalized_terms = re.findall(r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2})\b', text or "")
-    
-    # Extract hyphenated scientific terms
+    """Extract meaningful topics using pattern matching for scientific & technical terms"""
+    capitalized_terms = re.findall(r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3})\b', text or "")
     hyphenated = re.findall(r'\b([a-z]+(?:-[a-z]+)+)\b', (text or "").lower())
     
-    # Extract specific scientific patterns
     scientific_patterns = [
         r'\b(\w*magnetic\w*)\b',
         r'\b(\w*electric\w*)\b', 
@@ -141,11 +152,9 @@ def extract_topics(text: str, top_n=20):
         r'\b(\w*induction\w*)\b',
         r'\b(\w*oscillation\w*)\b',
         r'\b(\w*excretion\w*)\b',
-        r'\b(\w*skeletal\w*)\b',
-        r'\b(\w*muscular\w*)\b',
-        r'\b(\w*circulation\w*)\b',
-        r'\b(\w*respiration\w*)\b',
-        r'\b(\w*photosynthesis\w*)\b',
+        r'\b(\w*algorithm\w*)\b',
+        r'\b(\w*database\w*)\b',
+        r'\b(\w*structure\w*)\b'
     ]
     
     scientific_words = []
@@ -153,121 +162,178 @@ def extract_topics(text: str, top_n=20):
         matches = re.findall(pattern, (text or "").lower(), re.IGNORECASE)
         scientific_words.extend(matches)
     
-    # Combine all
     all_terms = (
-        [t.strip() for t in capitalized_terms if len(t) > 8] +  # Long proper nouns
-        [h for h in hyphenated if len(h) > 6] +  # Hyphenated terms
-        [s for s in scientific_words if len(s) > 5]  # Scientific terms
+        [t.strip() for t in capitalized_terms if len(t) > 6] +
+        [h for h in hyphenated if len(h) > 5] +
+        [s for s in scientific_words if len(s) > 5]
     )
     
-    # Count and return
-    counts = Counter([t.lower() for t in all_terms if t])
+    counts = Counter([t.title() if len(t.split()) > 1 else t.lower() for t in all_terms if t])
     return dict(counts.most_common(top_n))
 
-# -- Streamlit UI --
+def generate_markdown_study_paper(primary_subject, predicted_data, chapters, topics):
+    """Generate clean downloadable Markdown study paper."""
+    questions = predicted_data.get("questions", [])
+    total_marks = predicted_data.get("total_predicted_marks", 0)
+    avg_prob = predicted_data.get("average_probability", 0)
+    
+    md = []
+    md.append(f"# 🎯 HIGH-PROBABILITY PREDICTED EXAM PAPER & STUDY GUIDE")
+    md.append(f"**Subject Focus:** {primary_subject} | **Total Marks:** {total_marks} | **Confidence Forecast:** {avg_prob}%\n")
+    md.append(f"> Generated automatically by Paper Analyzer based on frequency analysis and curriculum topic weighting.\n")
+    md.append(f"---\n")
+    
+    md.append(f"## 📋 PART I: PREDICTED HIGH-YIELD QUESTIONS\n")
+    for q in questions:
+        md.append(f"### {q.get('id', 'Q')} [{q.get('estimated_marks', 5)} Marks] — Probability: {q.get('probability_score', 85)}% ({q.get('probability_tier', 'High')})")
+        md.append(f"**Topic:** {q.get('topic', 'Core')} | **Chapter:** {q.get('chapter', 'Unit')} | **Type:** {q.get('type', 'General')}")
+        md.append(f"\n**Question:**")
+        md.append(f"> {q.get('question', '')}\n")
+        md.append(f"**🎯 Exam Rationale:** {q.get('why_high_probability', '')}\n")
+        
+        md.append(f"**🔑 Key Scoring Points:**")
+        for pt in q.get('key_scoring_points', []):
+            md.append(f"- {pt}")
+        md.append(f"\n**💡 Step-by-Step Model Answer / Hint:**")
+        md.append(f"{q.get('model_answer_or_hint', '')}\n")
+        md.append(f"---\n")
+        
+    md.append(f"## 📊 PART II: SYLLABUS DISTRIBUTION & PRIORITY TOPICS\n")
+    md.append(f"### Top Chapters Covered:")
+    for ch, sc in list(chapters.items())[:5]:
+        md.append(f"- **{ch}**: Weight score {sc:.1f}")
+        
+    md.append(f"\n### Top Key Topics to Master:")
+    for tp, sc in list(topics.items())[:10]:
+        val = f"{sc:.2f}" if isinstance(sc, float) else f"{sc}"
+        md.append(f"- **{tp}** (Score: {val})")
+        
+    return "\n".join(md)
+
+# -- Streamlit UI Setup --
 st.set_page_config(
     layout="wide", 
-    page_title="📚 Study Smarter with Paper Analyzer", 
-    page_icon="🎓",
+    page_title="🎓 Paper Analyzer - Predicted Questions & Exam Forecaster", 
+    page_icon="📚",
     initial_sidebar_state="expanded"
 )
 
-# Hero Section
+# Custom CSS
 st.markdown("""
     <style>
     .big-title {
-        font-size: 3rem;
-        font-weight: 700;
-        background: linear-gradient(120deg, #667eea 0%, #764ba2 100%);
+        font-size: 2.8rem;
+        font-weight: 800;
+        background: linear-gradient(120deg, #4f46e5 0%, #7c3aed 50%, #db2777 100%);
         -webkit-background-clip: text;
         -webkit-text-fill-color: transparent;
-        margin-bottom: 0;
+        margin-bottom: 0.2rem;
     }
     .subtitle {
-        font-size: 1.3rem;
-        color: #666;
-        margin-top: 0;
+        font-size: 1.2rem;
+        color: #4b5563;
+        margin-bottom: 1.5rem;
     }
-    .feature-box {
+    .question-card {
+        background: #ffffff;
+        border: 1px solid #e5e7eb;
+        border-radius: 12px;
         padding: 1.5rem;
-        border-radius: 10px;
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        margin-bottom: 1.2rem;
+        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -1px rgba(0, 0, 0, 0.03);
+        transition: transform 0.15s ease-in-out, box-shadow 0.15s ease-in-out;
+    }
+    .prob-badge-very-high {
+        background: linear-gradient(135deg, #059669 0%, #10b981 100%);
         color: white;
-        margin: 1rem 0;
+        padding: 4px 12px;
+        border-radius: 9999px;
+        font-weight: 700;
+        font-size: 0.85rem;
+        display: inline-block;
+    }
+    .prob-badge-high {
+        background: linear-gradient(135deg, #4f46e5 0%, #6366f1 100%);
+        color: white;
+        padding: 4px 12px;
+        border-radius: 9999px;
+        font-weight: 700;
+        font-size: 0.85rem;
+        display: inline-block;
+    }
+    .prob-badge-mod {
+        background: linear-gradient(135deg, #d97706 0%, #f59e0b 100%);
+        color: white;
+        padding: 4px 12px;
+        border-radius: 9999px;
+        font-weight: 700;
+        font-size: 0.85rem;
+        display: inline-block;
+    }
+    .meta-tag {
+        background: #f3f4f6;
+        color: #374151;
+        padding: 3px 10px;
+        border-radius: 6px;
+        font-size: 0.82rem;
+        font-weight: 600;
+        margin-right: 6px;
+        display: inline-block;
     }
     </style>
-    <h1 class="big-title">🎓 Paper Analyzer</h1>
-    <p class="subtitle">Ace your exams by understanding what topics to focus on!</p>
+    <h1 class="big-title">🎓 Paper Analyzer & Exam Forecaster</h1>
+    <p class="subtitle">Upload exam papers to uncover recurring patterns and craft highest-probability predicted questions!</p>
 """, unsafe_allow_html=True)
 
 # Features highlight
 col_a, col_b, col_c = st.columns(3)
 with col_a:
-    st.markdown("### 🤖 AI-Powered")
-    st.caption("Smart analysis of your exam papers")
+    st.markdown("### 🎯 Highest-Probability Questions")
+    st.caption("AI-crafted high-yield questions with model answers")
 with col_b:
-    st.markdown("### 📊 Visual Insights")
-    st.caption("See what topics appear most")
+    st.markdown("### 📊 Syllabus & Topic Weights")
+    st.caption("Detailed visual breakdown of chapters & concepts")
 with col_c:
-    st.markdown("### ⚡ Lightning Fast")
-    st.caption("Results in seconds!")
+    st.markdown("### 📥 Instant Study Pack Export")
+    st.caption("Download formatted test papers with scoring rubrics")
 
 st.divider()
 
-# Show OCR status banner (friendlier)
-if PDF_OCR_AVAILABLE and is_ocr_available():
-    st.success("✨ **Image Recognition Enabled** - Can read text from diagrams and images!")
-else:
-    with st.expander("💡 Want to analyze papers with diagrams? Enable OCR!"):
-        st.markdown("""
-        OCR lets the analyzer read text from images, perfect for Physics papers with circuits and diagrams!
-        
-        **Quick Setup:**
-        ```bash
-        pip install pdf2image pytesseract pillow
-        ```
-        Then install Tesseract: [Download here](https://github.com/UB-Mannheim/tesseract/wiki)
-        """)
-
-# Sidebar for AI status (more friendly)
+# Sidebar
 with st.sidebar:
-    st.markdown("### 🚀 AI Status")
+    st.markdown("### 🚀 Engine Status")
     if AI_AVAILABLE:
         ai_status = get_ai_status()
         if ai_status['groq_available']:
             st.success("🎉 **Groq AI Active!**")
-            st.caption("✨ Using Llama 3.3 70B - Lightning fast & accurate!")
+            st.caption("✨ Using Llama 3.3 70B - Ultra fast & accurate")
         elif ai_status['gemini_available']:
-            st.warning("⚠️ **Gemini Active**")
-            st.caption("May have issues with some content. Try Groq instead!")
+            st.success("✅ **Google Gemini Active**")
+            st.caption("Using Gemini 2.5 Flash")
         elif ai_status['openai_available']:
             st.success("✅ **OpenAI Active**")
-            st.caption(f"Using: {ai_status['default_provider']}")
+            st.caption(f"Using {ai_status['default_provider']}")
         else:
-            st.info("📝 **Pattern Mode**")
-            st.caption("Basic analysis - add AI for better results!")
+            st.info("📝 **Intelligent Heuristic Mode**")
+            st.caption("Using smart curriculum synthesis templates")
     else:
-        st.info("💡 **No AI Connected**")
-        st.caption("Using pattern matching")
+        st.info("💡 **Pattern Mode**")
+        st.caption("Smart pattern & heuristic synthesizer")
     
     st.divider()
     st.markdown("""
-    ### 🎁 Get Free AI
-    
-    **Recommended:**  
-    🌟 [Groq](https://console.groq.com/keys) - FREE & Fast!
-    
-    **Alternatives:**  
-    📘 [Gemini](https://makersuite.google.com/app/apikey) - May block content
+    ### 🔑 AI API Keys (Optional)
+    Add free keys in `.env` to enable live LLM synthesis:
+    - 🌟 **[Groq (Recommended)](https://console.groq.com/keys)** - Fast & Free!
+    - 📘 **[Google Gemini](https://makersuite.google.com/app/apikey)**
+    - 🟢 **[OpenAI](https://platform.openai.com/api-keys)**
     
     ---
-    
-    💻 [View on GitHub](https://github.com/thenakshprajapat/paper-analyzer)
+    💻 [GitHub Repository](https://github.com/thenakshprajapat/paper-analyzer)
     """)
 
-# Main upload section
-st.markdown("### 📤 Upload Your Exam Papers")
-
+# Upload Section
+st.markdown("### 📤 Upload Exam Papers")
 col1, col2 = st.columns([1, 1])
 
 with col1:
@@ -275,25 +341,29 @@ with col1:
         "Drop your PDF files here or click to browse", 
         type=["pdf"], 
         accept_multiple_files=True,
-        help="Upload one or more exam papers (max 200MB each)"
+        help="Upload one or more past papers, sample papers, or unit tests"
     )
     
 with col2:
     if not uploaded_files:
-        st.info("👈 **Start by uploading your exam papers!**\n\nSupports: Sample papers, previous years, practice tests")
+        st.info("👈 **Upload one or more exam papers to begin.**\n\nThe engine will identify question structures, compute recurring topic weights, and synthesize top predicted questions.")
     else:
-        st.success(f"✅ **{len(uploaded_files)} paper(s) uploaded!**")
+        st.success(f"✅ **{len(uploaded_files)} paper(s) ready for analysis!**")
         for f in uploaded_files:
-            st.caption(f"� {f.name}")
+            st.caption(f"📄 {f.name}")
 
-use_ai = st.checkbox(
-    "🤖 Use AI for better accuracy", 
-    value=AI_AVAILABLE, 
-    disabled=not AI_AVAILABLE,
-    help="AI detects topics more accurately than keyword matching"
-)
+col_opt1, col_opt2 = st.columns(2)
+with col_opt1:
+    use_ai = st.checkbox(
+        "🤖 Enable AI Deep Synthesis", 
+        value=AI_AVAILABLE, 
+        disabled=not AI_AVAILABLE,
+        help="Synthesizes realistic exam questions with probability scoring"
+    )
+with col_opt2:
+    num_pred_questions = st.slider("Number of Predicted Questions to Craft", min_value=4, max_value=12, value=8)
 
-analyze_clicked = st.button("🚀 Analyze My Papers!", type="primary", use_container_width=True)
+analyze_clicked = st.button("🚀 Analyze Papers & Forecast Questions!", type="primary", use_container_width=True)
 
 def run_analysis_on_bytes(file_bytes, use_ai_param):
     text = extract_text_from_pdf_bytes(file_bytes)
@@ -301,113 +371,207 @@ def run_analysis_on_bytes(file_bytes, use_ai_param):
         return {"error": text}
     
     questions = identify_questions(text)
+    primary_subject = "General"
     
-    # Use AI analysis if available and enabled
     if use_ai_param and AI_AVAILABLE:
         try:
-            # PURE AI-powered analysis - NO KEYWORD MIXING!
             ai_chapters_result = analyze_chapters_ai(text)
             chapters = ai_chapters_result.get('chapters', {})
+            primary_subject = ai_chapters_result.get('primary_subject', 'General')
             topics = extract_topics_ai(text)
             
-            # If AI truly returns empty, fall back gracefully
             if not chapters:
-                st.warning("⚠️ AI returned no chapters - using pattern-based fallback")
                 chapters = analyze_chapters(text)
             if not topics:
-                st.warning("⚠️ AI returned no topics - using pattern-based fallback")
                 topics = extract_topics(text, top_n=20)
-            
             analysis_method = f"AI ({DEFAULT_PROVIDER})"
         except Exception as e:
-            st.error(f"❌ AI analysis failed: {e}")
-            # Fall back to pattern-based on error
             chapters = analyze_chapters(text)
             topics = extract_topics(text, top_n=20)
-            analysis_method = f"Pattern-based (AI error)"
+            analysis_method = "Pattern-based (Fallback)"
     else:
-        # Pattern-based analysis when AI not available/enabled
         chapters = analyze_chapters(text)
         topics = extract_topics(text, top_n=20)
-        analysis_method = "Pattern-based"
+        analysis_method = "Heuristic Pattern-based"
+
+    if chapters and primary_subject == "General":
+        primary_subject = list(chapters.keys())[0]
 
     return {
         "text": text,
         "questions": questions,
         "chapters": chapters,
         "topics": topics,
+        "primary_subject": primary_subject,
         "analysis_method": analysis_method
     }
 
 if uploaded_files and analyze_clicked:
     all_results = {}
     
-    # Show friendly progress
     progress_bar = st.progress(0)
     status_text = st.empty()
     
+    all_text = ""
+    agg_chapters = Counter()
+    agg_topics = Counter()
+    agg_questions = []
+    
     for idx, f in enumerate(uploaded_files):
-        status_text.markdown(f"� **Analyzing:** {f.name}...")
-        progress_bar.progress((idx + 1) / len(uploaded_files))
+        status_text.markdown(f"⏳ **Analyzing paper {idx+1}/{len(uploaded_files)}:** {f.name}...")
+        progress_bar.progress((idx + 0.5) / len(uploaded_files))
         
         bytes_data = f.read()
         res = run_analysis_on_bytes(bytes_data, use_ai)
         all_results[f.name] = res
-
+        
+        if "error" not in res:
+            all_text += "\n\n" + res.get("text", "")
+            for k, v in res.get("chapters", {}).items():
+                agg_chapters[k] += v
+            for k, v in res.get("topics", {}).items():
+                agg_topics[k] += v
+            agg_questions.extend(res.get("questions", []))
+            
+    progress_bar.progress(0.9)
+    status_text.markdown("🎯 **Crafting High-Probability Exam Questions & Model Solutions...**")
+    
+    primary_subject = list(agg_chapters.keys())[0] if agg_chapters else "General Science"
+    
+    # Craft High Probability Predicted Questions
+    predicted_data = craft_high_probability_questions(
+        text=all_text,
+        chapters=dict(agg_chapters),
+        topics=dict(agg_topics),
+        sample_questions=agg_questions[:8],
+        primary_subject=primary_subject,
+        num_questions=num_pred_questions
+    )
+    
+    progress_bar.progress(1.0)
     status_text.empty()
     progress_bar.empty()
-    st.balloons()  # Celebrate!
-    st.success(f"🎉 **Analysis Complete!** Found insights from {len(uploaded_files)} paper(s)")
+    st.balloons()
+    st.success(f"🎉 **Analysis & Question Forecasting Complete!** Evaluated {len(uploaded_files)} paper(s).")
     
-    # Display summarized dashboard with student-friendly language
+    # === HIGH-PROBABILITY QUESTIONS SECTION ===
     st.markdown("---")
-    st.markdown("## � Your Study Guide")
-    st.caption("Here's what topics you should focus on based on your papers")
-
-    # Aggregate over files
-    agg_chapters = Counter()
-    agg_topics = Counter()
-    analysis_methods = []
+    st.markdown(f"## 🎯 Crafted High-Probability Exam Questions")
+    st.caption("Synthesized based on recurring topic frequency, syllabus weightage, and standard exam patterns.")
     
-    for fname, res in all_results.items():
-        if "error" in res:
-            st.error(f"❌ Couldn't read {fname}: {res['error']}")
+    pred_questions = predicted_data.get("questions", [])
+    
+    # Stat Metrics Row
+    mcol1, mcol2, mcol3, mcol4 = st.columns(4)
+    with mcol1:
+        st.metric("Questions Crafted", len(pred_questions))
+    with mcol2:
+        st.metric("Avg Predicted Probability", f"{predicted_data.get('average_probability', 90)}%")
+    with mcol3:
+        st.metric("Total Marks Forecast", f"{predicted_data.get('total_predicted_marks', 40)} M")
+    with mcol4:
+        st.metric("Main Subject Focus", primary_subject)
+
+    # Download Button
+    study_paper_md = generate_markdown_study_paper(primary_subject, predicted_data, dict(agg_chapters), dict(agg_topics))
+    st.download_button(
+        label="📥 Download Predicted Question Paper & Solutions (.md)",
+        data=study_paper_md,
+        file_name=f"Predicted_Exam_Questions_{primary_subject.replace(' ', '_')}.md",
+        mime="text/markdown",
+        help="Download formatted questions with mark distributions, examiner rubrics, and step-by-step solutions"
+    )
+
+    # Filters
+    st.markdown("##### 🔍 Filter Forecasted Questions:")
+    fcol1, fcol2, fcol3 = st.columns(3)
+    
+    available_chapters = ["All"] + sorted(list({q.get("chapter", "General") for q in pred_questions}))
+    available_types = ["All"] + sorted(list({q.get("type", "General") for q in pred_questions}))
+    available_tiers = ["All", "Very High (90%+)", "High (80-89%)", "Moderate (<80%)"]
+    
+    with fcol1:
+        sel_chapter = st.selectbox("By Chapter/Unit", available_chapters)
+    with fcol2:
+        sel_type = st.selectbox("By Question Type", available_types)
+    with fcol3:
+        sel_tier = st.selectbox("By Probability Tier", available_tiers)
+
+    # Filter question list
+    filtered_qs = []
+    for q in pred_questions:
+        if sel_chapter != "All" and q.get("chapter") != sel_chapter:
             continue
-        
-        analysis_methods.append(res.get("analysis_method", "Unknown"))
-        for k, v in res.get("chapters", {}).items():
-            agg_chapters[k] += v
-        for k, v in res.get("topics", {}).items():
-            agg_topics[k] += v
+        if sel_type != "All" and q.get("type") != sel_type:
+            continue
+        if sel_tier != "All":
+            prob = q.get("probability_score", 85)
+            if "Very High" in sel_tier and prob < 90:
+                continue
+            if "High (80" in sel_tier and (prob < 80 or prob >= 90):
+                continue
+            if "Moderate" in sel_tier and prob >= 80:
+                continue
+        filtered_qs.append(q)
 
-    # Show analysis method (friendly)
-    if analysis_methods:
-        unique_methods = set(analysis_methods)
-        method_text = "🤖 AI-powered" if "AI" in str(unique_methods) else "📝 Pattern-based"
-        st.info(f"**Analysis Type:** {method_text}")
+    # Render Cards
+    if not filtered_qs:
+        st.info("No questions match the selected filters. Try choosing 'All'.")
+    else:
+        for q in filtered_qs:
+            prob = q.get("probability_score", 85)
+            badge_class = "prob-badge-very-high" if prob >= 90 else "prob-badge-high" if prob >= 80 else "prob-badge-mod"
+            
+            with st.container():
+                st.markdown(f"""
+                <div class="question-card">
+                    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px; flex-wrap:wrap; gap:8px;">
+                        <div>
+                            <span class="{badge_class}">🔥 {prob}% Probability ({q.get('probability_tier', 'High')})</span>
+                            <span class="meta-tag">🏷️ {q.get('estimated_marks', 5)} Marks</span>
+                            <span class="meta-tag">📐 {q.get('type', 'General')}</span>
+                            <span class="meta-tag">⚡ Difficulty: {q.get('difficulty', 'Medium')}</span>
+                        </div>
+                        <div>
+                            <span class="meta-tag" style="background:#e0e7ff; color:#3730a3;">📚 {q.get('chapter', 'Unit')}</span>
+                            <span class="meta-tag" style="background:#fce7f3; color:#9d174d;">🎯 {q.get('topic', 'Core Concept')}</span>
+                        </div>
+                    </div>
+                    <div style="font-size: 1.15rem; font-weight: 600; color: #111827; margin: 12px 0; line-height: 1.5;">
+                        {q.get('id', 'Q')}. {q.get('question', '')}
+                    </div>
+                    <div style="background:#f9fafb; padding:10px 14px; border-left:4px solid #6366f1; border-radius:4px; font-size:0.92rem; color:#4b5563; margin-bottom:12px;">
+                        <strong>💡 Why High Probability:</strong> {q.get('why_high_probability', '')}
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+                
+                with st.expander(f"📖 View Model Answer & Scoring Rubric for {q.get('id', 'Q')}"):
+                    st.markdown("**🔑 Examiner's Scoring Points:**")
+                    for pt in q.get('key_scoring_points', []):
+                        st.markdown(f"- {pt}")
+                    st.markdown("**💡 Step-by-Step Model Solution / Hint:**")
+                    st.info(q.get('model_answer_or_hint', ''))
 
-    col1, col2 = st.columns(2)
-
-    with col1:
-        st.markdown("### 📖 Subject Breakdown")
-        st.caption("Which subjects appear in your papers")
-        
+    # === VISUAL CHARTS SECTION ===
+    st.markdown("---")
+    st.markdown("## 📊 Syllabus Coverage & Topic Rankings")
+    
+    col_chart1, col_chart2 = st.columns(2)
+    with col_chart1:
+        st.markdown("### 📖 Subject & Chapter Breakdown")
         if agg_chapters:
             df_ch = pd.DataFrame({
                 "Chapter": list(agg_chapters.keys()),
                 "Score": list(agg_chapters.values())
             })
-            
-            # Normalize scores to percentages for better visualization
             total_score = df_ch["Score"].sum()
             if total_score > 0:
                 df_ch["Percentage"] = (df_ch["Score"] / total_score * 100).round(1)
                 df_ch = df_ch.sort_values("Percentage", ascending=False)
             else:
                 df_ch["Percentage"] = 0
-                df_ch = df_ch.sort_values("Score", ascending=False)
             
-            # Use discrete colors for chapters (more vibrant)
             fig = px.bar(df_ch, x="Chapter", y="Percentage", 
                         color="Chapter",
                         color_discrete_sequence=px.colors.qualitative.Vivid,
@@ -421,41 +585,28 @@ if uploaded_files and analyze_clicked:
             fig.update_traces(
                 texttemplate='%{y:.1f}%', 
                 textposition='outside',
-                textfont_size=14,
                 marker_line_color='white',
                 marker_line_width=2
             )
-            st.plotly_chart(fig, width='stretch')
-            
-            # Add friendly message
-            top_subject = df_ch.iloc[0]["Chapter"]
-            st.success(f"💡 **Main Focus:** {top_subject} covers {df_ch.iloc[0]['Percentage']:.1f}% of your papers!")
+            st.plotly_chart(fig, use_container_width=True)
         else:
-            st.warning("😕 Couldn't identify subjects - try uploading a different paper")
+            st.warning("No chapters identified")
 
-    with col2:
-        st.markdown("### 🎯 Key Topics to Study")
-        st.caption("Most important topics ranked by frequency")
-        
+    with col_chart2:
+        st.markdown("### 🎯 Top Key Topics to Study")
         if agg_topics:
             df_tp = pd.DataFrame({
                 "Topic": list(agg_topics.keys()),
                 "Score": list(agg_topics.values())
-            })
-            df_tp = df_tp.sort_values("Score", ascending=False).head(15)
+            }).sort_values("Score", ascending=False).head(12)
             
-            # Normalize to show relative importance
             max_score = df_tp["Score"].max()
-            if max_score > 0:
-                df_tp["Relevance"] = (df_tp["Score"] / max_score).round(3)
-            else:
-                df_tp["Relevance"] = 0
+            df_tp["Relevance"] = (df_tp["Score"] / max_score).round(3) if max_score > 0 else 0
             
-            # Use gradient colors for topics (purple gradient for modern look)
             fig2 = px.bar(df_tp, x="Relevance", y="Topic", orientation="h",
                          color="Relevance",
                          color_continuous_scale="purples",
-                         labels={"Relevance": "Importance"})
+                         labels={"Relevance": "Weight / Importance"})
             fig2.update_layout(
                 yaxis={'categoryorder':'total ascending'},
                 plot_bgcolor='rgba(0,0,0,0)',
@@ -463,65 +614,43 @@ if uploaded_files and analyze_clicked:
                 font=dict(size=13),
                 showlegend=False
             )
-            fig2.update_traces(
-                marker_line_color='white',
-                marker_line_width=1.5
-            )
-            st.plotly_chart(fig2, width='stretch')
-            
-            # Study tip
-            top_3 = df_tp.head(3)["Topic"].tolist()
-            st.info(f"📝 **Study Priority:** Focus on {', '.join(top_3[:2])} first!")
+            st.plotly_chart(fig2, use_container_width=True)
         else:
             st.warning("No topics identified")
-    
-    st.divider()
 
-    # Show per-file details
-    st.subheader("📄 Individual File Details")
+    # File Details Section
+    st.divider()
+    st.subheader("📄 Uploaded File Insights")
     for fname, res in all_results.items():
-        with st.expander(f"📋 {fname}"):
+        with st.expander(f"📋 Details for {fname}"):
             if "error" in res:
                 st.error(res["error"])
                 continue
             
-            col1, col2, col3 = st.columns(3)
-            col1.metric("Questions Found", len(res.get("questions", [])))
-            col2.metric("Chapters", len(res.get("chapters", {})))
-            col3.metric("Topics", len(res.get("topics", {})))
-            
-            if res.get("chapters"):
-                st.markdown("**Chapters:**")
-                for ch, score in list(res["chapters"].items())[:5]:
-                    st.write(f"- {ch}: {score:.2f}")
-            
-            if res.get("topics"):
-                st.markdown("**Top Topics:**")
-                topics_str = ", ".join([f"{t} ({s:.1f})" for t, s in list(res["topics"].items())[:10]])
-                st.write(topics_str)
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Questions Detected", len(res.get("questions", [])))
+            c2.metric("Chapters", len(res.get("chapters", {})))
+            c3.metric("Topics", len(res.get("topics", {})))
             
             if res.get("questions"):
-                st.markdown("**Sample Questions:**")
+                st.markdown("**Sample Extracted Questions from Paper:**")
                 for i, q in enumerate(res["questions"][:3], 1):
-                    st.caption(f"{i}. {q[:200]}...")
+                    st.caption(f"{i}. {q[:220]}...")
 else:
-    # Welcome screen
+    # Welcome hero
     st.markdown("""
     ### 🎯 How it works:
-    1. 📤 Upload your exam papers (PDF format)
-    2. 🤖 AI analyzes chapters, topics, and questions
-    3. 📊 View beautiful interactive charts
-    4. 📚 Get study recommendations
+    1. 📤 **Upload one or more exam papers** (PDF format with text or scanned diagrams).
+    2. 🤖 **Engine extracts syllabus distribution**, recurring topics, and question difficulty.
+    3. ⚡ **Synthesizes Highest-Probability Exam Questions** with estimated marks and reasons why they are likely.
+    4. 💡 **Explore Model Answers & Examiner Scoring Rubrics** for active recall practice.
+    5. 📥 **Download a custom predicted test paper** to test yourself before the real exam!
     
-    ### ✨ Features:
-    - ✅ **AI-powered analysis** with Google Gemini
-    - ✅ **Interactive charts** with Plotly
-    - ✅ **Batch processing** - upload multiple papers
-    - ✅ **Smart topic extraction** - context-aware
-    - ✅ **Free to use** - Gemini free tier included
-    
-    ### 📝 Tips:
-    - Use complete exam papers for best results
-    - PDFs must have extractable text (not scanned images)
-    - Enable AI mode in sidebar for accurate analysis
+    ### ✨ Core Capabilities:
+    - ✅ **AI & Heuristic Question Forecaster**
+    - ✅ **Probability Likelihood Ratings** (e.g. 96% Very High)
+    - ✅ **Examiner Rubrics & Step-by-Step Model Answers**
+    - ✅ **Interactive Multi-Subject Visualization**
+    - ✅ **Works 100% Offline & with Groq / Gemini / OpenAI APIs**
     """)
+

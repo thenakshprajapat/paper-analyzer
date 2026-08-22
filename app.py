@@ -1,12 +1,23 @@
 from flask import Flask, render_template, request, jsonify
 from flask_cors import CORS
-import PyPDF2
 import re
 from collections import Counter
 import os
 from werkzeug.utils import secure_filename
 import logging
 from dotenv import load_dotenv
+
+# Safe PyPDF2 import
+try:
+    import PyPDF2
+    PYPDF2_AVAILABLE = True
+except ImportError:
+    try:
+        import pypdf as PyPDF2
+        PYPDF2_AVAILABLE = True
+    except ImportError:
+        PyPDF2 = None
+        PYPDF2_AVAILABLE = False
 
 # Load environment variables from .env file
 load_dotenv()
@@ -16,6 +27,7 @@ try:
     from ai_utils import (
         analyze_chapters_ai, 
         extract_topics_ai, 
+        craft_high_probability_questions,
         get_ai_status,
         DEFAULT_PROVIDER
     )
@@ -24,27 +36,27 @@ except ImportError as e:
     logging.warning(f"AI utilities not available: {e}")
     AI_ENABLED = False
 
-# --- App setup (must be defined before route decorators) ---
+# Import PDF extraction with OCR if available
+try:
+    from pdf_extractor import extract_structured_questions, extract_text_with_ocr, PDF_OCR_AVAILABLE
+except ImportError:
+    PDF_OCR_AVAILABLE = False
+    extract_structured_questions = None
+    extract_text_with_ocr = None
+
+# --- App setup ---
 app = Flask(__name__, static_folder='static', template_folder='templates')
 CORS(app)
 
 # Logging
-logging.basicConfig(level=logging.DEBUG)
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-# Log AI status
-if AI_ENABLED:
-    ai_status = get_ai_status()
-    logger.info(f"AI Status: {ai_status}")
-    logger.info(f"Using provider: {DEFAULT_PROVIDER}")
-else:
-    logger.warning("AI features disabled - using basic keyword matching only")
 
 # Config
 UPLOAD_FOLDER = 'uploads'
 ALLOWED_EXTENSIONS = {'pdf'}
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
-app.config['MAX_CONTENT_LENGTH'] = 32 * 1024 * 1024  # 32MB max during debugging
+app.config['MAX_CONTENT_LENGTH'] = 32 * 1024 * 1024  # 32MB max
 
 if not os.path.exists(UPLOAD_FOLDER):
     os.makedirs(UPLOAD_FOLDER, exist_ok=True)
@@ -55,7 +67,7 @@ CHAPTER_KEYWORDS = {
     'Physics': ['mechanics', 'thermodynamics', 'optics', 'electromagnetism', 'waves', 'quantum'],
     'Chemistry': ['organic', 'inorganic', 'physical chemistry', 'chemical bonding', 'equilibrium'],
     'Biology': ['cell', 'genetics', 'evolution', 'ecology', 'physiology', 'botany', 'zoology'],
-    'Computer Science': ['programming', 'algorithms', 'data structures', 'database', 'networks', 'operating system'],
+    'Computer Science': ['programming', 'algorithms', 'data structures', 'database', 'networks', 'operating system', 'python', 'sql'],
     'English': ['grammar', 'comprehension', 'literature', 'writing', 'vocabulary'],
     'History': ['ancient', 'medieval', 'modern', 'civilization', 'revolution', 'war'],
     'Geography': ['physical geography', 'human geography', 'climate', 'maps', 'resources']
@@ -65,22 +77,36 @@ def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
 def extract_text_from_pdf(pdf_path):
-    """Extract text from PDF file using PyPDF2. Returns string or raises."""
+    """Extract text from PDF file using PyPDF2 or OCR fallback."""
     try:
-        with open(pdf_path, 'rb') as f:
-            reader = PyPDF2.PdfReader(f)
-            text_parts = []
-            for page in reader.pages:
-                page_text = page.extract_text()
-                if page_text:
-                    text_parts.append(page_text)
-        return '\n'.join(text_parts)
+        if PDF_OCR_AVAILABLE and extract_text_with_ocr:
+            with open(pdf_path, 'rb') as f:
+                pdf_bytes = f.read()
+            ocr_text = extract_text_with_ocr(pdf_bytes, use_ocr=True)
+            if ocr_text and len(ocr_text.strip()) > 100:
+                return ocr_text
+
+        if PYPDF2_AVAILABLE and PyPDF2 is not None:
+            with open(pdf_path, 'rb') as f:
+                reader = PyPDF2.PdfReader(f)
+                text_parts = []
+                for page in reader.pages:
+                    page_text = page.extract_text()
+                    if page_text:
+                        text_parts.append(page_text)
+            return '\n'.join(text_parts)
+        return ""
     except Exception as e:
         logger.exception("PDF text extraction failed for %s", pdf_path)
         raise
 
 def identify_questions(text):
-    """Identify questions in the text (best-effort)"""
+    """Identify questions in the text with structured extraction or regex fallback."""
+    if extract_structured_questions:
+        structured = extract_structured_questions(text)
+        if structured:
+            return [q["text"] for q in structured]
+            
     question_patterns = [
         r'Q\s*\d+[\.\):]',
         r'Question\s*\d+[\.\):]',
@@ -91,13 +117,12 @@ def identify_questions(text):
     for pattern in question_patterns:
         for match in re.finditer(pattern, text, re.MULTILINE | re.IGNORECASE):
             start = match.start()
-            end = min(len(text), start + 400)  # grab a larger context
+            end = min(len(text), start + 400)
             question_text = text[start:end].strip()
             questions.append(question_text)
     if questions:
         return questions
-    # fallback: split by lines and return non-empty lines
-    return [line.strip() for line in text.splitlines() if line.strip()]
+    return [line.strip() for line in text.splitlines() if len(line.strip()) > 20]
 
 def analyze_chapters(text):
     text_lower = text.lower()
@@ -135,6 +160,7 @@ def ai_status_route():
         return jsonify(status)
     else:
         return jsonify({
+            'groq_available': False,
             'gemini_available': False,
             'openai_available': False,
             'default_provider': 'basic',
@@ -144,22 +170,14 @@ def ai_status_route():
 @app.route('/upload', methods=['POST'])
 def upload_file():
     try:
-        logger.debug("Received upload request. Headers: %s", dict(request.headers))
-        if not request.files:
-            logger.warning("No files in request.files. form keys: %s", request.form.keys())
-            return jsonify({'error': 'No files found in request. Make sure the request uses multipart/form-data.'}), 400
-
-        if 'file' not in request.files:
-            logger.warning("Key 'file' not present in request.files. Keys: %s", list(request.files.keys()))
+        if not request.files or 'file' not in request.files:
             return jsonify({'error': "Upload key must be named 'file'."}), 400
 
         file = request.files['file']
         if file.filename == '':
-            logger.warning("Empty filename")
             return jsonify({'error': 'No file selected.'}), 400
 
         if not allowed_file(file.filename):
-            logger.warning("Disallowed file type: %s", file.filename)
             return jsonify({'error': 'Invalid file type. Please upload a PDF.'}), 400
 
         filename = secure_filename(file.filename)
@@ -171,30 +189,25 @@ def upload_file():
         text = extract_text_from_pdf(filepath)
         questions = identify_questions(text)
         
-        # Use AI-powered analysis if available, otherwise fall back to basic keyword matching
         use_ai = request.form.get('use_ai', 'true').lower() == 'true'
+        primary_subject = "General Science"
         
         if AI_ENABLED and use_ai:
-            logger.info(f"Using AI-powered analysis with provider: {DEFAULT_PROVIDER}")
             try:
-                # AI-powered chapter and topic analysis
                 ai_chapters = analyze_chapters_ai(text)
                 ai_topics = extract_topics_ai(text)
                 
-                # Convert AI results to match expected format
                 chapters = ai_chapters.get('chapters', {})
+                primary_subject = ai_chapters.get('primary_subject', 'General Science')
                 topics = ai_topics
                 
-                # If AI didn't find much, supplement with basic analysis
                 if len(chapters) < 2:
-                    logger.info("AI found few chapters, supplementing with basic analysis")
                     basic_chapters = analyze_chapters(text)
                     for ch, count in basic_chapters.items():
                         if ch not in chapters:
                             chapters[ch] = count
                 
                 if len(topics) < 5:
-                    logger.info("AI found few topics, supplementing with basic analysis")
                     basic_topics = extract_topics(text)
                     for topic, count in basic_topics.items():
                         if topic not in topics:
@@ -207,25 +220,42 @@ def upload_file():
                 topics = extract_topics(text)
                 analysis_method = "basic_fallback"
         else:
-            # Basic keyword-based analysis
-            logger.info("Using basic keyword-based analysis")
             chapters = analyze_chapters(text)
             topics = extract_topics(text)
             analysis_method = "basic"
+
+        if chapters and primary_subject == "General Science":
+            primary_subject = list(chapters.keys())[0]
+
+        # Craft High-Probability Predicted Exam Questions
+        predicted_result = craft_high_probability_questions(
+            text=text,
+            chapters=chapters,
+            topics=topics,
+            sample_questions=questions[:6],
+            primary_subject=primary_subject,
+            provider=DEFAULT_PROVIDER if (AI_ENABLED and use_ai) else 'basic',
+            num_questions=8
+        )
 
         # cleanup
         try:
             os.remove(filepath)
         except Exception:
-            logger.debug("Could not remove temp file %s", filepath)
+            pass
 
         return jsonify({
             'success': True,
             'total_questions': len(questions),
             'chapters': chapters,
             'topics': topics,
+            'primary_subject': primary_subject,
+            'predicted_questions': predicted_result.get('questions', []),
+            'average_probability': predicted_result.get('average_probability', 90),
+            'total_predicted_marks': predicted_result.get('total_predicted_marks', 40),
+            'top_predicted_topics': predicted_result.get('top_predicted_topics', []),
             'sample_questions': questions[:5],
-            'analysis_method': analysis_method,  # Let frontend know which method was used
+            'analysis_method': analysis_method,
             'ai_available': AI_ENABLED
         })
     except Exception as e:
@@ -233,4 +263,5 @@ def upload_file():
         return jsonify({'error': 'Server error: ' + str(e)}), 500
 
 if __name__ == '__main__':
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    # use_reloader=False prevents watchdog on Windows from rebooting server mid-upload
+    app.run(debug=True, host='0.0.0.0', port=5000, use_reloader=False)

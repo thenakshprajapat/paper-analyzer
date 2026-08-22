@@ -5,9 +5,19 @@ Enhanced PDF text extraction with OCR support for image-heavy documents.
 import io
 import logging
 import os
+import re
 from typing import Optional
 
-import PyPDF2
+try:
+    import PyPDF2
+    PYPDF2_AVAILABLE = True
+except ImportError:
+    try:
+        import pypdf as PyPDF2
+        PYPDF2_AVAILABLE = True
+    except ImportError:
+        PyPDF2 = None
+        PYPDF2_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +73,9 @@ def extract_text_with_ocr(pdf_bytes: bytes, use_ocr: bool = True) -> str:
     
     # First try PyPDF2 (fast for text-based PDFs)
     try:
+        if not PYPDF2_AVAILABLE:
+            logger.warning("PyPDF2 is not installed.")
+            return ""
         reader = PyPDF2.PdfReader(io.BytesIO(pdf_bytes))
         total_pages = len(reader.pages)
         logger.info(f"Extracting text from {total_pages} pages")
@@ -165,3 +178,96 @@ def extract_text_simple(pdf_bytes: bytes) -> str:
 def is_ocr_available() -> bool:
     """Check if OCR dependencies are installed."""
     return OCR_AVAILABLE
+
+
+def extract_structured_questions(text: str) -> list:
+    """
+    Intelligently segment raw exam text into individual questions with extracted marks.
+    
+    Returns:
+        List of dicts: [{"id": "Q1", "text": "...", "marks": 5, "section": "Section A"}]
+    """
+    if not text or not text.strip():
+        return []
+        
+    lines = text.splitlines()
+    questions = []
+    current_section = "General"
+    current_q = None
+    
+    section_pattern = re.compile(r'^(?:SECTION|PART|GROUP|UNIT)\s*[-:]?\s*([A-Z0-9]+)', re.IGNORECASE)
+    q_start_pattern = re.compile(
+        r'^(?:Q(?:uestion)?\s*[\.:#]?\s*(\d+[a-z]?)|(\d{1,3})[\.\)\:]\s+)',
+        re.IGNORECASE
+    )
+    marks_pattern = re.compile(r'\[\s*(?:Marks?\s*:\s*)?(\d{1,2})\s*(?:Marks?|M|pts?)?\s*\]|\(\s*(\d{1,2})\s*(?:Marks?|M|pts?)\s*\)', re.IGNORECASE)
+    
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            continue
+            
+        sec_match = section_pattern.match(stripped)
+        if sec_match:
+            current_section = f"Section {sec_match.group(1).upper()}"
+            continue
+            
+        q_match = q_start_pattern.match(stripped)
+        if q_match:
+            # Save previous question
+            if current_q and len(current_q["text"]) > 15:
+                questions.append(current_q)
+                
+            q_num = q_match.group(1) or q_match.group(2)
+            q_id = f"Q{q_num}" if q_num else f"Q{len(questions)+1}"
+            
+            # Check for marks in this line
+            marks = None
+            m_match = marks_pattern.search(stripped)
+            if m_match:
+                try:
+                    marks = int(m_match.group(1) or m_match.group(2))
+                except (ValueError, TypeError):
+                    marks = None
+                    
+            current_q = {
+                "id": q_id,
+                "text": stripped,
+                "marks": marks,
+                "section": current_section
+            }
+        else:
+            if current_q:
+                # Append line to ongoing question if not too huge
+                if len(current_q["text"]) < 1200:
+                    current_q["text"] += " " + stripped
+                    # Check for marks in continued lines
+                    if current_q["marks"] is None:
+                        m_match = marks_pattern.search(stripped)
+                        if m_match:
+                            try:
+                                current_q["marks"] = int(m_match.group(1) or m_match.group(2))
+                            except (ValueError, TypeError):
+                                pass
+                                
+    if current_q and len(current_q["text"]) > 15:
+        questions.append(current_q)
+        
+    # Fallback to simple line regex if structured extraction yielded < 2 questions
+    if len(questions) < 2:
+        simple_matches = re.finditer(r'(?:Q\s*\d+[\.\):]|Question\s*\d+[\.\):]|^\d+[\.\)])\s*(.+?)(?=(?:Q\s*\d+[\.\):]|Question\s*\d+[\.\):]|^\d+[\.\)]|$)', text, re.DOTALL | re.MULTILINE | re.IGNORECASE)
+        fallback_qs = []
+        for idx, match in enumerate(simple_matches, 1):
+            q_text = match.group(0).strip()[:400]
+            if len(q_text) > 15:
+                fallback_qs.append({
+                    "id": f"Q{idx}",
+                    "text": q_text,
+                    "marks": None,
+                    "section": "General"
+                })
+        if fallback_qs:
+            return fallback_qs
+            
+    return questions
+
